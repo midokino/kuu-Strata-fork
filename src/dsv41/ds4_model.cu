@@ -5444,10 +5444,23 @@ struct Model::Impl {
                 room = std::max(0.0, room - std::min(budget, all) * nm);
             }
             double budget_t = budget;   // the drafter's experts first, all of them (every draft uses its blocks)
+            // (local: DS4_MTP_VRAM_GB caps the drafter's VRAM experts, split evenly over its blocks; the rest stream
+            // like the trunk's.  On a 12 GB card the drafter otherwise takes every slot and the prompt path falls to
+            // windows of 16)
+            double mtp_cap = 1e300;
+            if (const char* v = std::getenv("DS4_MTP_VRAM_GB")) {
+                int n_m = 0;
+                for (const Layer& l : L)
+                    if (l.grp == (int) gi && l.mtp) ++n_m;
+                if (n_m > 0) mtp_cap = std::max(0.0, std::atof(v)) * 1e9 / n_m;
+            }
             for (Layer& l : L)
                 if (l.grp == (int) gi && l.mtp) {
-                    l.n_vram = std::min(l.n_exp, (int) std::floor(budget_t / (double) ucount(l)));
+                    l.n_vram = std::min(l.n_exp, (int) std::floor(std::min(budget_t, mtp_cap) / (double) ucount(l)));
                     budget_t -= (double) l.n_vram * ucount(l);
+                    if (mtp_cap < 1e300 && o.verbose)
+                        std::fprintf(stderr, "ds4: DS4_MTP_VRAM_GB: drafter %s keeps %d of %d experts in VRAM\n", l.name.c_str(),
+                                     l.n_vram, l.n_exp);
                 }
             double want = 0;
             for (const Layer& l : L)
@@ -5468,7 +5481,7 @@ struct Model::Impl {
                 if (l.grp == (int) gi) used += (double) ucount(l) * l.n_vram;
             // what the floors left: whole experts, layer by layer
             for (Layer& l : L) {
-                if (l.grp != (int) gi || l.cpu_only) continue;
+                if (l.grp != (int) gi || l.cpu_only || (l.mtp && mtp_cap < 1e300)) continue;
                 while (l.n_vram < l.n_exp && used + (double) ucount(l) <= budget) {
                     ++l.n_vram;
                     used += (double) ucount(l);
