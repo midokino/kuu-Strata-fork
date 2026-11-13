@@ -784,7 +784,7 @@ def restore_point_settings(env=None) -> tuple[bool, int]:
     return whole("STRATA_DS4_RESTORE_POINTS", 4) > 0, whole("STRATA_DS4_RESTORE_TAIL", 512)
 
 
-def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTORE_LEAST) -> dict:
+def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTORE_LEAST, shared_least=None) -> dict:
     """Where the DeepSeek engine keeps restore points for this prompt -> {"marks": [pos, ...], "tail": pos, "shared":
     pos} (any may be missing; {}: none).  From the prompt's ids as the template wrote them: a turn opens with its role's
     special token (<｜User｜>, a tool result's turn too; <｜System｜> for a system message after the first user turn), and
@@ -806,7 +806,10 @@ def deepseek_restore_points(ids, user_id, system_id=None, tail=512, least=RESTOR
         elif t == system_id and first is not None:
             last = i
     marks, out = [], {}
-    if first is not None and first >= least:
+    # (local) shared_least: the shortest shared start marked (default `least`); STRATA_DS4_SHARED_LEAST lowers it so a
+    # short side request's system prompt (an agent's approval guardian, ~190 tokens) is kept and its next call reads
+    # only its own question - the engine's STRATA_DS4_PREFIX_MIN has to be as low
+    if first is not None and first >= (least if shared_least is None else shared_least):
         out["shared"] = first
     if last is not None and last >= least and last != first:
         marks.append(last)
@@ -4355,6 +4358,8 @@ def child_env(cfg: dict, *, offline: bool = False) -> dict:
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in ordered_gpus(cfg))
     for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
         env[str(k)] = str(v)
+        if str(k) == "STRATA_DS4_SHARED_LEAST":      # (local: the server reads this one itself, set_restore_points)
+            os.environ[str(k)] = str(v)
     if (cfg.get("arch") or "") == "deepseek41":      # (only this engine reads these; Qwen's environment is untouched)
         deepseek_slot_env(env, cfg)
     parallel_stack_env(env, cfg)
@@ -6055,9 +6060,17 @@ class Service:
         if not on:
             return
         user_id, system_id = self.deepseek_turn_ids()
-        pts = deepseek_restore_points(ids, user_id, system_id, tail)
+        try:
+            shared_least = int(os.environ.get("STRATA_DS4_SHARED_LEAST", RESTORE_LEAST))   # (local)
+        except ValueError:
+            shared_least = RESTORE_LEAST
+        pts = deepseek_restore_points(ids, user_id, system_id, tail, shared_least=shared_least)
         pref = req.get("strata_prefix")
-        if (isinstance(pref, dict) and pref.get("tokens")) or os.environ.get("STRATA_DS4_RESTORE_SHARED") == "0":
+        # (local: a pin under 256 tokens is one the engine does not keep - ds4_main.cpp's `r.pin >= 256` - so with
+        #  STRATA_DS4_SHARED_LEAST below that the shared mark stays and keeps the start instead)
+        pin = pref.get("tokens") if isinstance(pref, dict) else None
+        short_pin = isinstance(pin, int) and pin < 256 and shared_least < 256
+        if (pin and not short_pin) or os.environ.get("STRATA_DS4_RESTORE_SHARED") == "0":
             pts.pop("shared", None)   # (the system prompt is already the pin's, or STRATA_DS4_RESTORE_SHARED=0: no shared mark)
         if pts:
             req["_restore"] = pts
