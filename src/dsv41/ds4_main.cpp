@@ -293,6 +293,8 @@ bool round(strata::ds4::Model& m, int tok, int room, bool spec, float conf_min, 
         tl_gate(true);
         const double rt0 = rt_now();
         const unsigned long long rs0 = rt_seq();
+        if (cum_min < 0) cum_min = dspark_cum_default(m);
+        m.set_draft_cut(conf_min, cum_min, std::min(room - 1, g_spec_depth));   // (local: STRATA_DS4_DSPARK_LAZY)
         if (!m.draft(tok, drafts, conf, err, temperature, top_p, top_k, min_p, seed, counter)) return false;
         g_rt.draft += rt_now() - rt0;
         tl_gate(false);

@@ -170,11 +170,17 @@ __device__ __forceinline__ float swiglu(float gv, float uv, float limit) {
     }
     return __fmul_rn(__fdiv_rn(gv, __fadd_rn(1.0f, expf(-gv))), uv);
 }
-__device__ __forceinline__ float combine(const float* plan_w, const float* p, int k, const float* cpu_part, float sh) {
+__device__ __forceinline__ float combine(const float* plan_w, const float* p, int k, const float* cpu_part, float sh,
+                                         float scale = 1.0f) {
     float m = 0.0f;
     for (int i = 0; i < k; ++i) m = __fmaf_rn(plan_w[i], p[i], m);
     if (cpu_part != nullptr) m = __fadd_rn(m, *cpu_part);
+    if (scale != 1.0f) m = __fmul_rn(m, scale);   // (local: STRATA_DS4_SKIP_RENORM; 1 leaves the bits as they were)
     return __fadd_rn(m, sh);
+}
+// (local) the host's scale for token t: Resp::scale[kWin] follows Resp::cpu[kWin] (kWin 16; ds4_kernels.cuh asserts it)
+__device__ __forceinline__ float resp_scale(const int* cpu_flag, int t) {
+    return cpu_flag != nullptr ? reinterpret_cast<const float*>(cpu_flag + 16)[t] : 1.0f;
 }
 
 // a Q8_0 block's 32 values, exactly (an FP16 scale times an int8; the block is only 2-byte aligned)
@@ -721,7 +727,7 @@ __global__ void __launch_bounds__(128) mx_combine_kernel(const CombArgs a) {
     a.out[(size_t) t * a.out_stride + r] =
         combine(a.plan_w + t * 8, p, a.k,
                 a.cpu_flag != nullptr && a.cpu_flag[t] ? a.cpu_part + (size_t) t * a.cpu_stride + r : nullptr,
-                a.sh_out != nullptr ? a.sh_out[(size_t) t * a.n_embd + r] : 0.0f);
+                a.sh_out != nullptr ? a.sh_out[(size_t) t * a.n_embd + r] : 0.0f, resp_scale(a.cpu_flag, t));
 }
 
 __global__ void mx_wait_kernel(const unsigned* p, unsigned v) {

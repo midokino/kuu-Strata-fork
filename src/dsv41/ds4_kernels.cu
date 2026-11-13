@@ -534,6 +534,11 @@ __global__ void __launch_bounds__(512) route_kernel(const float* __restrict__ lo
     __shared__ int bi[32];
     __shared__ int pick[16];
     const int t = blockIdx.x;
+    // (local, STRATA_DS4_ROUTE_KNORM) k's bits 8+: the model's own count, picked and summed for the weights' norm;
+    // only the first k (bits 0-7) are output - the ones past it are left out with their weight, not renormalised
+    const int kn = k >> 8;
+    k &= 255;
+    const int kk = kn > k ? (kn < 16 ? kn : 16) : k;
     logits += (size_t) t * 1024;
     if (bias_vl != nullptr && ((vl.w[t >> 5] >> (t & 31)) & 1u)) bias = bias_vl;
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
@@ -544,7 +549,7 @@ __global__ void __launch_bounds__(512) route_kernel(const float* __restrict__ lo
     }
     __syncthreads();
     const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
-    for (int r = 0; r < k; ++r) {
+    for (int r = 0; r < kk; ++r) {
         float best = -FLT_MAX;
         int bix = 0x7fffffff;
         for (int i = threadIdx.x; i < n; i += blockDim.x)
@@ -569,7 +574,7 @@ __global__ void __launch_bounds__(512) route_kernel(const float* __restrict__ lo
     }
     if (threadIdx.x == 0) {
         float s = 0.0f;
-        for (int r = 0; r < k; ++r) s += sc[pick[r]];
+        for (int r = 0; r < kk; ++r) s += sc[pick[r]];
         for (int r = 0; r < k; ++r) {
             idx[(size_t) t * kPicks + r] = pick[r];
             w[(size_t) t * kPicks + r] = sc[pick[r]] / (s + 1e-20f) * route_scale;
@@ -1616,6 +1621,11 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
     __shared__ int pick[16];
     __shared__ int on_cpu;
     const int t = blockIdx.x;
+    // (local, STRATA_DS4_ROUTE_KNORM) k's bits 8+: the model's own count, picked and summed for the weights' norm;
+    // only the first k (bits 0-7) are output - the ones past it are left out with their weight, not renormalised
+    const int kn = k >> 8;
+    k &= 255;
+    const int kk = kn > k ? (kn < 16 ? kn : 16) : k;
     logits += (size_t) t * 1024;
     if (bias_vl != nullptr && ((vl >> t) & 1u)) bias = bias_vl;
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
@@ -1626,7 +1636,7 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
     }
     __syncthreads();
     const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
-    for (int r = 0; r < k; ++r) {
+    for (int r = 0; r < kk; ++r) {
         float best = -FLT_MAX;
         int bix = 0x7fffffff;
         for (int i = threadIdx.x; i < n; i += blockDim.x)
@@ -1651,7 +1661,7 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
     }
     if (threadIdx.x == 0) {
         float s = 0.0f;
-        for (int r = 0; r < k; ++r) s += sc[pick[r]];
+        for (int r = 0; r < kk; ++r) s += sc[pick[r]];
         int cpu = 0;
         for (int r = 0; r < k; ++r) {
             const float wv = sc[pick[r]] / (s + 1e-20f) * route_scale;

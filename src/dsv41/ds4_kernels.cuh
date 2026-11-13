@@ -231,8 +231,11 @@ struct Resp {
     unsigned seq;
     int pad[3];
     int cpu[kWin];   // 1: part[t] is the CPU lane's weighted sum for token t
+    float scale[kWin];   // (local) the routed experts' sum times this (1: as before; STRATA_DS4_SKIP_RENORM); right after cpu[]
     float part[kWin][kMaxDim];
 };
+// (local) ds4_gguf.cu reads Resp::scale as the 16 floats after Resp::cpu (resp_scale)
+static_assert(kWin == 16 && sizeof(int) == sizeof(float), "resp_scale in ds4_gguf.cu takes kWin 16");
 /// route() for the T tokens of a window, plus: plan_ptr[t][i] = vram[idx[t][i]] (0: not on the device), each token's x
 /// (dim floats) and picks into the request slot, then T and seq (req null: no request, the plan alone).
 void route_publish(const float* logits, const float* bias, int n, int k, int T, float route_scale,
