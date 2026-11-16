@@ -9788,6 +9788,61 @@ struct Model::Impl {
                     }
                     if (skip_renorm && wlost > 0.0f && wsum - wlost > 1e-20f) rp.scale[t] = wsum / (wsum - wlost);
                 }
+                // (local) STRATA_DS4_EST=1: a count for the "skip more on the draft rows" estimate - of the window's distinct
+                // CPU-lane experts kept (after the skips) and not in RAM, those that no row 0 takes and whose every taker's
+                // route share is under 0.25 / 0.30 (the SSD reads a draft-row-only DISK_SKIP of 0.25 / 0.30 would save).
+                // Printed every 20000 requests.
+                static const bool est_on = std::getenv("STRATA_DS4_EST") != nullptr;
+                if (est_on && !l.mtp && li < g.nl) {
+                    static std::atomic<long long> e_req{0}, e_rows{0}, e_win{0}, e_disk{0}, e_d25{0}, e_d30{0}, e_ram{0},
+                        e_r25{0}, e_disk1{0};
+                    float ws[kWin];
+                    for (int t = 0; t < T; ++t) {
+                        ws[t] = 0.0f;
+                        for (int i = 0; i < l.k_exp; ++i)
+                            if (r.ids[t][i] >= 0 && r.ids[t][i] < l.n_exp) ws[t] += r.w[t][i];
+                    }
+                    std::vector<std::pair<int, int>> pk(picks);
+                    std::sort(pk.begin(), pk.end());
+                    long long dk = 0, d25 = 0, d30 = 0, rm = 0, r25 = 0;
+                    for (size_t a = 0; a < pk.size();) {
+                        const int e = pk[a].first;
+                        bool row0 = false;
+                        float mx = 0.0f;
+                        for (; a < pk.size() && pk[a].first == e; ++a) {
+                            const int t = pk[a].second / kPicks, i = pk[a].second % kPicks;
+                            row0 = row0 || t == 0;
+                            if (ws[t] > 0.0f) mx = std::max(mx, r.w[t][i] / ws[t]);
+                        }
+                        if (!in_ram(l, e)) {
+                            ++dk;
+                            if (!row0 && mx < 0.25f) ++d25;
+                            if (!row0 && mx < 0.30f) ++d30;
+                        } else {
+                            ++rm;
+                            if (!row0 && mx < 0.25f) ++r25;
+                        }
+                    }
+                    ++e_req;
+                    e_rows += T;
+                    if (T > 1) ++e_win;
+                    e_disk += dk;
+                    e_d25 += d25;
+                    e_d30 += d30;
+                    e_ram += rm;
+                    e_r25 += r25;
+                    if (T == 1) e_disk1 += dk;
+                    if (e_req % 20000 == 0) {
+                        const double rq = (double) e_req.load();
+                        std::fprintf(stderr,
+                                     "est: %lld requests (%lld windows, %.2f rows a request): per request - disk experts kept %.3f "
+                                     "(of them draft-row-only under 0.25: %.3f, under 0.30: %.3f), RAM experts kept %.3f "
+                                     "(draft-row-only under 0.25: %.3f); disk experts on single-row requests %.3f\n",
+                                     (long long) rq, e_win.load(), e_rows.load() / rq, e_disk.load() / rq, e_d25.load() / rq,
+                                     e_d30.load() / rq, e_ram.load() / rq, e_r25.load() / rq,
+                                     e_req.load() > e_win.load() ? e_disk1.load() / (rq - e_win.load()) : 0.0);
+                    }
+                }
                 // (local) STRATA_DS4_A3_W=w (0: off): in a window (T > 1), a CPU-lane pick no other row of the window
                 // takes, lighter than w of its token's route, is left out too - the lane's cost goes by the window's
                 // distinct experts, and the shared ones are kept (OEA's idea, without its re-routing)
