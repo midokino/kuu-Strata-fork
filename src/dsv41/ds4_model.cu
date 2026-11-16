@@ -1408,6 +1408,7 @@ struct Model::Impl {
     }
     unsigned seq_issued = 0;
     std::atomic<int> layer_of[kRing];
+    std::atomic<int> spec_of[kRing];   // (local) 1: the request is a draft's verification window (spec_win)
     std::thread service;
     std::atomic<bool> quit{false};
     std::thread store_bg;   // the RAM store's fill beyond the first 48 GB, read after the model is ready (preload_store)
@@ -3864,6 +3865,7 @@ struct Model::Impl {
                 std::memset((void*) resps_late, 0, sizeof(Resp) * kRing);
             }
             for (auto& x : layer_of) x.store(-1);
+            for (auto& x : spec_of) x.store(0);
             ahead_fl.assign(L.size() * 1024, 0);
             ahead_rank.assign(L.size() * 1024, 0);
             ahead_for.assign(L.size(), 0);
@@ -9717,7 +9719,16 @@ struct Model::Impl {
                 // B x its route sum; past it the heaviest of the skip candidates are computed after all.  Lets the
                 // per-expert thresholds go up while the worst token stays bounded.
                 static const float skip_budget = env_f("STRATA_DS4_SKIP_BUDGET", 0.0f);
+                // (local) STRATA_DS4_DRAFT_RAM_W / STRATA_DS4_DRAFT_DISK_W: on a verify window's draft rows (t >= 1) the
+                // RAM / disk skip thresholds are raised to these (row 0 - the accepted token - keeps the usual ones).
+                // STRATA_DS4_DRAFT_ALL=1: every window (T > 1) counts as one - for --score --window n.
+                static const float d_ram_w = env_f("STRATA_DS4_DRAFT_RAM_W", 0.0f), d_dsk_w = env_f("STRATA_DS4_DRAFT_DISK_W", 0.0f);
+                static const bool d_all = std::getenv("STRATA_DS4_DRAFT_ALL") != nullptr;
+                const bool draft_win = T > 1 && (d_all || spec_of[next % kRing].load(std::memory_order_relaxed) != 0);
                 for (int t = 0; t < T; ++t) {
+                    const bool drow = draft_win && t > 0;
+                    const float ram_w_t = drow ? std::max(ram_skip_w, d_ram_w) : ram_skip_w;
+                    const float dsk_w_t = drow ? std::max(disk_skip_w, d_dsk_w) : disk_skip_w;
                     float wsum = 0.0f;   // (DISK_SKIP_W: the token's route weights)
                     float wlost = 0.0f;  // (SKIP_RENORM: the weight left out)
                     if (dsk || rsk)
@@ -9731,8 +9742,8 @@ struct Model::Impl {
                             const int e = r.ids[t][i];
                             if (e < 0 || e >= l.n_exp || l.slot[(size_t) e] >= 0) continue;
                             if (T == 1 && !l.zc.empty() && l.zc[(size_t) e]) continue;
-                            const bool lt = dsk && r.w[t][i] < disk_skip_w * wsum;
-                            if ((lt && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_skip_w * wsum)) {
+                            const bool lt = dsk && r.w[t][i] < dsk_w_t * wsum;
+                            if ((lt && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_w_t * wsum)) {
                                 is_c[i] = 1;
                                 cand += r.w[t][i];
                             }
@@ -9758,7 +9769,7 @@ struct Model::Impl {
                             st.ahead_hit += (fl[e] & 6) != 0;
                             st.ahead_hit2 += (fl[e] >> 2) & 1;
                         }
-                        const bool light = dsk && r.w[t][i] < disk_skip_w * wsum;
+                        const bool light = dsk && r.w[t][i] < dsk_w_t * wsum;
                         if (aon && !light) ++heavy;
                         if (l.rc_n > 0 && l.slot[(size_t) e] >= l.rc_base && l.slot[(size_t) e] < l.rc_base + l.rc_n)
                             l.rc_stamp[(size_t) (l.slot[(size_t) e] - l.rc_base)] = rc_clock.load(std::memory_order_relaxed);
@@ -9769,7 +9780,7 @@ struct Model::Impl {
                                 ++st.store_zc;
                                 continue;
                             }
-                            if (!keep_anyway[i] && ((light && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_skip_w * wsum))) {
+                            if (!keep_anyway[i] && ((light && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_w_t * wsum))) {
                                 ++st.skipped;
                                 wlost += r.w[t][i];
                                 continue;
@@ -11290,6 +11301,7 @@ struct Model::Impl {
         for (int i = 0; i < g.n_mtp && dp.async; ++i) {
             const int il = g.nl + i;
             dp.seq[il] = ++seq_issued;
+            spec_of[dp.seq[il] % kRing].store(spec_win ? 1 : 0, std::memory_order_relaxed);
             layer_of[dp.seq[il] % kRing].store(il, std::memory_order_release);
         }
         const size_t hs = (size_t) T * H * D, rs = (size_t) g.win * g.hd;
@@ -11541,6 +11553,7 @@ struct Model::Impl {
         for (int i = 0; i < g.n_mtp && dp.async; ++i) {
             const int il = g.nl + i;
             dp.seq[il] = ++seq_issued;
+            spec_of[dp.seq[il] % kRing].store(spec_win ? 1 : 0, std::memory_order_relaxed);
             layer_of[dp.seq[il] % kRing].store(il, std::memory_order_release);
         }
         int cur = d_dev;   // the device the blocks' rows are on
@@ -13783,6 +13796,7 @@ struct Model::Impl {
             }
             if (wp.async) {
                 wp.seq[il] = ++seq_issued;
+                spec_of[wp.seq[il] % kRing].store(spec_win ? 1 : 0, std::memory_order_relaxed);
                 layer_of[wp.seq[il] % kRing].store(il, std::memory_order_release);
             }
         }
