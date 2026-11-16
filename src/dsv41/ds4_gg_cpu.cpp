@@ -16,6 +16,7 @@
 #include "strata/kernels/cpu/iq_avx2.hpp"
 #include "strata/kernels/cpu/iq_avx512.hpp"
 
+#include <atomic>
 #include <mutex>
 #include <vector>
 #if defined(_MSC_VER)
@@ -247,7 +248,45 @@ void gg_cpu_gate_up(const IqCpu& f, const uint8_t* gate, const uint8_t* up, cons
         uo[t] = tmp[t].data();
     }
     dots(f.tg, gate, f.gu_row, f.n_embd, act, nt, ff, r0, r1);
-    dots(f.tg, up, f.gu_row, f.n_embd, act, nt, uo, r0, r1);
+    // (local, experimental, CHANGES THE ANSWERS) STRATA_DS4_NEURON_SKIP=tau (0 = off): one token, the rows whose |SiLU(gate)|
+    // is below tau x the piece's mean are left out of up (h = 0 there) - up's bytes for those rows are not read
+    static const float nskip = std::getenv("STRATA_DS4_NEURON_SKIP") ? (float) std::atof(std::getenv("STRATA_DS4_NEURON_SKIP")) : 0.0f;
+    if (nskip > 0.0f && nt == 1 && r1 > r0) {
+        static std::atomic<long long> n_rows{0}, n_skip{0};
+        static const bool reg = [] {
+            std::atexit([] {
+                std::fprintf(stderr, "neuron skip: %lld of %lld up rows left out (%.1f%%)\n", n_skip.load(), n_rows.load(),
+                             n_rows.load() > 0 ? 100.0 * (double) n_skip.load() / (double) n_rows.load() : 0.0);
+            });
+            return true;
+        }();
+        (void) reg;
+        thread_local std::vector<float> s;
+        s.resize((size_t) r1);
+        double mean = 0.0;
+        for (int r = r0; r < r1; ++r) {
+            float g = ff[0][r];
+            if (limit > 0.0f) g = g < limit ? g : limit;
+            s[(size_t) r] = std::fabs(g / (1.0f + std::exp(-g)));
+            mean += s[(size_t) r];
+        }
+        const float thr = (float) (nskip * mean / (r1 - r0));
+        long long sk = 0;
+        for (int r = r0; r < r1;) {
+            if (s[(size_t) r] < thr) {
+                uo[0][r] = 0.0f;
+                ++sk;
+                ++r;
+                continue;
+            }
+            const int a = r;
+            while (r < r1 && s[(size_t) r] >= thr) ++r;
+            dots(f.tg, up, f.gu_row, f.n_embd, act, 1, uo, a, r);
+        }
+        n_rows.fetch_add(r1 - r0, std::memory_order_relaxed);
+        n_skip.fetch_add(sk, std::memory_order_relaxed);
+    } else
+        dots(f.tg, up, f.gu_row, f.n_embd, act, nt, uo, r0, r1);
     for (int t = 0; t < nt; ++t)
         for (int r = r0; r < r1; ++r) {
             float g = ff[t][r], u = uo[t][r];

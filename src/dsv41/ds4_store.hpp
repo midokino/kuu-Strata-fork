@@ -565,7 +565,12 @@ private:
         if (n == 0) return false;
         const size_t bytes = n * sb;
         const uint64_t avail = cfg_.ram_avail ? cfg_.ram_avail() : ~uint64_t{0};
-        if (avail != ~uint64_t{0} && avail < bytes + cfg_.floor_bytes) return false;
+#if defined(_WIN32)
+        const bool pre = os::range_large();   // (local: large pages - the whole arena is already committed)
+#else
+        const bool pre = false;
+#endif
+        if (!pre && avail != ~uint64_t{0} && avail < bytes + cfg_.floor_bytes) return false;
         void* p = arena_ + used_;
         if (!os::range_commit(p, bytes)) return false;
         chunks_.push_back({p, bytes});

@@ -1623,9 +1623,14 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
     const int t = blockIdx.x;
     // (local, STRATA_DS4_ROUTE_KNORM) k's bits 8+: the model's own count, picked and summed for the weights' norm;
     // only the first k (bits 0-7) are output - the ones past it are left out with their weight, not renormalised
-    const int kn = k >> 8;
+    // (local, STRATA_DS4_A2_M / _W) k's bits 16-19: m, bits 20-27: a weight in %: a pick on the CPU lane (vram 0)
+    // lighter than that share of the route is swapped for the router's best VRAM-held expert among the next m
+    const int a2m = (k >> 16) & 15;
+    const float a2t = (float) ((k >> 20) & 255) * 0.01f;
+    const int kn = (k >> 8) & 255;
     k &= 255;
     const int kk = kn > k ? (kn < 16 ? kn : 16) : k;
+    const int kq = a2m > 0 ? min(16, max(kk, k + a2m)) : kk;
     logits += (size_t) t * 1024;
     if (bias_vl != nullptr && ((vl >> t) & 1u)) bias = bias_vl;
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
@@ -1636,7 +1641,7 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
     }
     __syncthreads();
     const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
-    for (int r = 0; r < kk; ++r) {
+    for (int r = 0; r < kq; ++r) {
         float best = -FLT_MAX;
         int bix = 0x7fffffff;
         for (int i = threadIdx.x; i < n; i += blockDim.x)
@@ -1662,6 +1667,17 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
     if (threadIdx.x == 0) {
         float s = 0.0f;
         for (int r = 0; r < kk; ++r) s += sc[pick[r]];
+        if (a2m > 0) {
+            float sk = 0.0f;   // (the k outputs' sum: the host's skip rules measure against it)
+            for (int r = 0; r < k; ++r) sk += sc[pick[r]];
+            int nx = k;
+            for (int r = k - 1; r >= 0 && nx < kq; --r) {   // (the lightest first)
+                if (vram[pick[r]] != 0ull || sc[pick[r]] >= a2t * sk) continue;
+                while (nx < kq && vram[pick[nx]] == 0ull) ++nx;
+                if (nx >= kq) break;
+                pick[r] = pick[nx++];
+            }
+        }
         int cpu = 0;
         for (int r = 0; r < k; ++r) {
             const float wv = sc[pick[r]] / (s + 1e-20f) * route_scale;

@@ -11,6 +11,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -517,8 +518,79 @@ inline void* anon_alloc(size_t bytes, int node, int nodes) {
 }
 /// An address range of `bytes` reserved (no memory behind it yet), and pieces of it made real: the store's arena is one range so a
 /// kernel can tell its pointers by [lo, hi).  nullptr: it could not be had.
+#if defined(_WIN32)
+/// (local) STRATA_DS4_LARGE_PAGES=1: the range is 2 MB pages, reserved and committed at once (Windows cannot commit large pages
+/// piece by piece), never paged out; range_commit / range_decommit then do nothing.  Needs SeLockMemoryPrivilege in the
+/// token (enabled here); without it, or when the system has no contiguous memory for it, the 4 KB range as before.
+inline bool& range_large() {
+    static bool v = false;
+    return v;
+}
+// (one 37 GB large-page allocation is refused with 1450 even when 40 GB of 256 MB ones are had in 5 s: the range is taken
+// as consecutive 256 MB pieces at one address range found first)
+constexpr size_t kLargePiece = (size_t) 256 << 20;
+inline size_t& range_large_bytes() {
+    static size_t v = 0;
+    return v;
+}
+inline void* large_pieces(size_t lb) {
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        // (a large-page allocation at a given address needs it 2 MB-aligned; VirtualAlloc's reservations are 64 KB-aligned)
+        void* r = VirtualAlloc(nullptr, lb + kLargePiece, MEM_RESERVE, PAGE_READWRITE);
+        if (r == nullptr) return nullptr;
+        VirtualFree(r, 0, MEM_RELEASE);
+        const size_t lpm = GetLargePageMinimum();
+        void* base = (void*) (((uintptr_t) r + lpm - 1) / lpm * lpm);
+        size_t off = 0;
+        DWORD err = 0;
+        for (; off < lb; off += kLargePiece) {
+            const size_t n = std::min(kLargePiece, lb - off);
+            if (VirtualAlloc((uint8_t*) base + off, n, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE) == nullptr) {
+                err = GetLastError();
+                break;
+            }
+        }
+        if (off >= lb) return base;
+        for (size_t o = 0; o < off; o += kLargePiece) VirtualFree((uint8_t*) base + o, 0, MEM_RELEASE);
+        if (err != ERROR_INVALID_ADDRESS) {   // (not a race for the address range: the memory itself was not had)
+            SetLastError(err);
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+inline bool enable_lock_privilege() {
+    HANDLE tok = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) return false;
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    bool ok = LookupPrivilegeValueA(nullptr, "SeLockMemoryPrivilege", &tp.Privileges[0].Luid) &&
+              AdjustTokenPrivileges(tok, FALSE, &tp, 0, nullptr, nullptr) && GetLastError() == ERROR_SUCCESS;
+    CloseHandle(tok);
+    return ok;
+}
+#endif
 inline void* range_reserve(size_t bytes) {
 #if defined(_WIN32)
+    const char* lp = std::getenv("STRATA_DS4_LARGE_PAGES");
+    if (lp != nullptr && std::atoi(lp) != 0) {
+        const size_t lpm = GetLargePageMinimum();
+        if (lpm > 0 && enable_lock_privilege()) {
+            const size_t lb = (bytes + lpm - 1) / lpm * lpm;
+            const auto t0 = std::chrono::steady_clock::now();
+            void* m = large_pieces(lb);
+            const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            if (m != nullptr) {
+                range_large() = true;
+                range_large_bytes() = lb;
+                std::fprintf(stderr, "ds4: RAM store on large pages (%.1f GB, %zu KB pages, %.1f s)\n", lb / 1e9, lpm >> 10, s);
+                return m;
+            }
+            std::fprintf(stderr, "ds4: RAM store: large pages not had (error %lu after %.1f s): 4 KB pages\n", GetLastError(), s);
+        } else
+            std::fprintf(stderr, "ds4: RAM store: no SeLockMemoryPrivilege: 4 KB pages\n");
+    }
     return VirtualAlloc(nullptr, bytes, MEM_RESERVE, PAGE_READWRITE);
 #else
     void* m = ::mmap(nullptr, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -527,6 +599,7 @@ inline void* range_reserve(size_t bytes) {
 }
 inline bool range_commit(void* p, size_t bytes) {
 #if defined(_WIN32)
+    if (range_large()) return true;
     return VirtualAlloc(p, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr;
 #else
     return ::mprotect(p, bytes, PROT_READ | PROT_WRITE) == 0;
@@ -535,6 +608,7 @@ inline bool range_commit(void* p, size_t bytes) {
 /// A committed piece of a reserved range given back to the system (its address range stays reserved)
 inline void range_decommit(void* p, size_t bytes) {
 #if defined(_WIN32)
+    if (range_large()) return;
     VirtualFree(p, bytes, MEM_DECOMMIT);
 #else
     ::madvise(p, bytes, MADV_DONTNEED);
@@ -545,6 +619,10 @@ inline void range_release(void* p, size_t bytes) {
     if (p == nullptr) return;
 #if defined(_WIN32)
     (void) bytes;
+    if (range_large()) {
+        for (size_t o = 0; o < range_large_bytes(); o += kLargePiece) VirtualFree((uint8_t*) p + o, 0, MEM_RELEASE);
+        return;
+    }
     VirtualFree(p, 0, MEM_RELEASE);
 #else
     ::munmap(p, bytes);

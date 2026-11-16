@@ -1367,6 +1367,17 @@ struct Model::Impl {
     int route_k(const Layer& l) const {
         return route_knorm && !l.mtp && l.k_exp < g.k_exp && g.k_exp <= 16 ? (l.k_exp | (g.k_exp << 8)) : l.k_exp;
     }
+    // (local) STRATA_DS4_A2_M=m, STRATA_DS4_A2_W=w (0: off; decode's route_publish only): a CPU-lane pick lighter than
+    // w of the route is swapped for the router's best VRAM-held expert among its next m picks (its own weight, no
+    // renormalisation) - the GPU, which waits on the CPU lane, takes the work.  Layers from DISK_SKIP_FROM on.
+    const int a2_m = std::getenv("STRATA_DS4_A2_M") ? std::max(0, std::min(15, std::atoi(std::getenv("STRATA_DS4_A2_M")))) : 0;
+    const float a2_w = std::getenv("STRATA_DS4_A2_W") ? (float) std::atof(std::getenv("STRATA_DS4_A2_W")) : 0.0f;
+    int route_k_pub(const Layer& l) const {
+        int k = route_k(l);
+        if (a2_m > 0 && a2_w > 0.0f && !l.mtp && l.il >= disk_skip_from && l.il < g.nl)
+            k |= (a2_m << 16) | (std::min(255, (int) (a2_w * 100.0f + 0.5f)) << 20);
+        return k;
+    }
     unsigned seq_issued = 0;
     std::atomic<int> layer_of[kRing];
     std::thread service;
@@ -9665,12 +9676,40 @@ struct Model::Impl {
                 // would give them (the GPU's combine multiplies by rp.scale[t]).  Off: the weight is lost, as before.
                 static const bool skip_renorm = std::getenv("STRATA_DS4_SKIP_RENORM") != nullptr &&
                                                 std::atoi(std::getenv("STRATA_DS4_SKIP_RENORM")) != 0;
+                // (local) STRATA_DS4_SKIP_BUDGET=B (0 = off): the weight a token may leave out in a layer is at most
+                // B x its route sum; past it the heaviest of the skip candidates are computed after all.  Lets the
+                // per-expert thresholds go up while the worst token stays bounded.
+                static const float skip_budget = env_f("STRATA_DS4_SKIP_BUDGET", 0.0f);
                 for (int t = 0; t < T; ++t) {
                     float wsum = 0.0f;   // (DISK_SKIP_W: the token's route weights)
                     float wlost = 0.0f;  // (SKIP_RENORM: the weight left out)
                     if (dsk || rsk)
                         for (int i = 0; i < l.k_exp; ++i)
                             if (r.ids[t][i] >= 0 && r.ids[t][i] < l.n_exp) wsum += r.w[t][i];
+                    char keep_anyway[32] = {};
+                    if (skip_budget > 0.0f && (dsk || rsk) && l.k_exp <= 32) {
+                        float cand = 0.0f;
+                        char is_c[32] = {};
+                        for (int i = 0; i < l.k_exp; ++i) {
+                            const int e = r.ids[t][i];
+                            if (e < 0 || e >= l.n_exp || l.slot[(size_t) e] >= 0) continue;
+                            if (T == 1 && !l.zc.empty() && l.zc[(size_t) e]) continue;
+                            const bool lt = dsk && r.w[t][i] < disk_skip_w * wsum;
+                            if ((lt && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_skip_w * wsum)) {
+                                is_c[i] = 1;
+                                cand += r.w[t][i];
+                            }
+                        }
+                        while (cand > skip_budget * wsum) {
+                            int j = -1;
+                            for (int i = 0; i < l.k_exp; ++i)
+                                if (is_c[i] && (j < 0 || r.w[t][i] > r.w[t][j])) j = i;
+                            if (j < 0) break;
+                            is_c[j] = 0;
+                            keep_anyway[j] = 1;
+                            cand -= r.w[t][j];
+                        }
+                    }
                     for (int i = 0; i < l.k_exp; ++i) {
                         const int e = r.ids[t][i];
                         if (e < 0 || e >= l.n_exp) continue;
@@ -9693,7 +9732,7 @@ struct Model::Impl {
                                 ++st.store_zc;
                                 continue;
                             }
-                            if ((light && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_skip_w * wsum)) {
+                            if (!keep_anyway[i] && ((light && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_skip_w * wsum))) {
                                 ++st.skipped;
                                 wlost += r.w[t][i];
                                 continue;
@@ -9711,6 +9750,36 @@ struct Model::Impl {
                         }
                     }
                     if (skip_renorm && wlost > 0.0f && wsum - wlost > 1e-20f) rp.scale[t] = wsum / (wsum - wlost);
+                }
+                // (local) STRATA_DS4_A3_W=w (0: off): in a window (T > 1), a CPU-lane pick no other row of the window
+                // takes, lighter than w of its token's route, is left out too - the lane's cost goes by the window's
+                // distinct experts, and the shared ones are kept (OEA's idea, without its re-routing)
+                static const float a3_w = env_f("STRATA_DS4_A3_W", 0.0f);
+                if (a3_w > 0.0f && T > 1 && rsk && picks.size() > 1) {
+                    static std::atomic<long long> a3_n{0}, a3_all{0};
+                    static bool a3_reg = false;
+                    if (!a3_reg) {
+                        a3_reg = true;
+                        std::atexit([] { std::fprintf(stderr, "a3: %lld of %lld window CPU-lane picks left out\n", a3_n.load(), a3_all.load()); });
+                    }
+                    float ws[kWin] = {};
+                    for (int t = 0; t < T; ++t)
+                        for (int i = 0; i < l.k_exp; ++i)
+                            if (r.ids[t][i] >= 0 && r.ids[t][i] < l.n_exp) ws[t] += r.w[t][i];
+                    const std::vector<std::pair<int, int>> all = picks;
+                    picks.clear();
+                    for (const auto& pk_ : all) {
+                        const int t = pk_.second / kPicks, i = pk_.second % kPicks;
+                        int c = 0;
+                        for (const auto& q : all) c += q.first == pk_.first;
+                        if (c == 1 && r.w[t][i] < a3_w * ws[t]) {
+                            ++st.skipped;
+                            ++a3_n;
+                            continue;
+                        }
+                        picks.push_back(pk_);
+                    }
+                    a3_all += (long long) all.size();
                 }
                 if (aon) skip_auto_tick(li, T, heavy, cold, heavy_cpu);
                 if (disk_skip_auto && dsk_rule && !picks.empty()) {   // (the experts this answer leaves in RAM)
@@ -14447,7 +14516,7 @@ struct Model::Impl {
                 route_ahead(gl, nx->gate_bias, nx->n_exp, m, T, reqs + slot, (a - 1) * kAhead1, s);
                 na[a - 1] = m;
             }
-            route_publish(d.glog, l.gate_bias, l.n_exp, route_k(l), T, g.route_scale, l.vram_tab, d.x, D, d.ridx, d.rw,
+            route_publish(d.glog, l.gate_bias, l.n_exp, route_k_pub(l), T, g.route_scale, l.vram_tab, d.x, D, d.ridx, d.rw,
                           d.plan_ptr, lead ? reqs + slot : nullptr, sq, s, l.gate_bias_vl, l.mtp ? 0u : wp.vl, na[0],
                           na[1]);
             if (!mv(d, {job(l.s1, d.x, d.sg, T, D, FF), job(l.s3, d.x, d.su, T, D, FF)}, err)) return false;
