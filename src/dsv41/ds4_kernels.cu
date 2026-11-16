@@ -1965,7 +1965,7 @@ __global__ void __launch_bounds__(kThreads) ar_sum_kernel(float* x, int n4, cons
 // would have added post[k] * y to stream k; comb (non-null) is the mixing the attention's hc_post applied since, so the
 // late add is sum_j comb[j][k] * post[j] * y - what the on-time add would have become; comb null: post[k] * y as is.
 __global__ void defer_add_kernel(float* h, const Resp* r, const float* __restrict__ post, const float* __restrict__ comb,
-                                 int dim, int hc) {
+                                 const float* __restrict__ comb2, int dim, int hc) {
     const int e = blockIdx.x * blockDim.x + threadIdx.x, t = blockIdx.y;
     if (e >= dim) return;
     if (!((volatile const int*) r->cpu)[t]) return;
@@ -1973,7 +1973,14 @@ __global__ void defer_add_kernel(float* h, const Resp* r, const float* __restric
     float* hr = h + (size_t) t * hc * dim;
     for (int k = 0; k < hc; ++k) {
         float c;
-        if (comb != nullptr) {
+        if (comb != nullptr && comb2 != nullptr) {   // (STRATA_DS4_DEFER=3: through the next layer's attention and FFN mixing)
+            c = 0.0f;
+            for (int j = 0; j < hc; ++j) {
+                float m = 0.0f;
+                for (int i = 0; i < hc; ++i) m = __fmaf_rn(comb[(size_t) t * 64 + i * hc + j], post[(size_t) t * 8 + i], m);
+                c = __fmaf_rn(comb2[(size_t) t * 64 + j * hc + k], m, c);
+            }
+        } else if (comb != nullptr) {
             c = 0.0f;
             for (int j = 0; j < hc; ++j) c = __fmaf_rn(comb[(size_t) t * 64 + j * hc + k], post[(size_t) t * 8 + j], c);
         } else c = post[(size_t) t * 8 + k];
@@ -2367,12 +2374,13 @@ void hc_post_inplace(const float* y, float* h, const float* post, const float* c
 #endif
     strata_ds4_launch(hc_post_inplace_kernel, dim3(cdiv(dim, kThreads), T), kThreads, 0, s, y, h, post, comb, dim, hc);
 }
-void defer_add(float* h, const Resp* r, const float* post, const float* comb, int dim, int hc, int T, cudaStream_t s) {
+void defer_add(float* h, const Resp* r, const float* post, const float* comb, int dim, int hc, int T, cudaStream_t s,
+               const float* comb2) {
 #if defined(STRATA_METAL)
-    (void) h; (void) r; (void) post; (void) comb; (void) dim; (void) hc; (void) T; (void) s;
+    (void) h; (void) r; (void) post; (void) comb; (void) dim; (void) hc; (void) T; (void) s; (void) comb2;
     return;
 #else
-    strata_ds4_launch(defer_add_kernel, dim3(cdiv(dim, kThreads), T), kThreads, 0, s, h, r, post, comb, dim, hc);
+    strata_ds4_launch(defer_add_kernel, dim3(cdiv(dim, kThreads), T), kThreads, 0, s, h, r, post, comb, comb2, dim, hc);
 #endif
 }
 void hc_mix_scale(const float* h, int hcdim, int n_mix, int T, float eps, float* mixes, cudaStream_t s) {

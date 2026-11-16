@@ -1378,7 +1378,7 @@ struct Model::Impl {
     }
     bool defer_ok(const Layer& l) const {
         const int on = defer_mode();
-        if (on == 2 && resps_late == nullptr) return false;
+        if (on >= 2 && resps_late == nullptr) return false;
         if (l.nm != 1) return false;
         static const int mx = std::getenv("STRATA_DS4_DEFER_MAX") != nullptr ? std::atoi(std::getenv("STRATA_DS4_DEFER_MAX")) : 1 << 20;
         static const bool renorm = std::getenv("STRATA_DS4_SKIP_RENORM") != nullptr && std::atoi(std::getenv("STRATA_DS4_SKIP_RENORM")) != 0;
@@ -3854,7 +3854,7 @@ struct Model::Impl {
             resps = (Resp*) m;
             std::memset((void*) reqs, 0, sizeof(Req) * kRing);
             std::memset((void*) resps, 0, sizeof(Resp) * kRing);
-            if (defer_mode() == 2) {   // (local) STRATA_DS4_DEFER=2: the light experts' answers, a ring of their own
+            if (defer_mode() >= 2) {   // (local) STRATA_DS4_DEFER=2/3: the light experts' answers, a ring of their own
                 if (cudaHostAlloc(&m, sizeof(Resp) * kRing, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
                     err = "host-mapped memory for the deferred answers";
                     return false;
@@ -9880,7 +9880,7 @@ struct Model::Impl {
                 }
                 static const bool lane_skip = std::getenv("DS4_LANE_SKIP") != nullptr;   // (timing oracle: the lane's compute left out; rp.cpu stays 0)
                 // (local) STRATA_DS4_DEFER=2: the heavy entries answered first (rp), the light ones after into resps_late
-                const bool split2 = defer_mode() == 2 && defer_ok(l);
+                const bool split2 = defer_mode() >= 2 && defer_ok(l);
                 if (split2) {
                     late_ans = &resps_late[next % kRing];
                     for (int t = 0; t < kWin; ++t) late_ans->cpu[t] = 0;
@@ -14583,7 +14583,7 @@ struct Model::Impl {
         if (nm > 1) allreduce(d.ao, T * D, ag, mi, ++d.ar_seq, d.xcnt, s);
         hc_post(d.ao, d.h, d.a_post, d.a_comb, D, H, T, d.h2, s);
         std::swap(d.h, d.h2);
-        if (pend_on && mi == 0) {   // (local) STRATA_DS4_DEFER: the previous layer's CPU-lane part, through this attention's mixing
+        if (pend_on && mi == 0 && defer_mode() != 3) {   // (local) STRATA_DS4_DEFER: the previous layer's CPU-lane part, through this attention's mixing
             pend_on = false;
             wait_seq(&pend_src[pend_slot].seq, pend_sq, s);
             defer_add(d.h, pend_src + pend_slot, d.def_post, pend_il + 1 == l.il ? d.a_comb : nullptr, D, H, pend_T, s);
@@ -14632,7 +14632,7 @@ struct Model::Impl {
             prof_mark(d, 2);
             const x3::ExpertLayout& lay = nm > 1 ? l.hlay : l.lay;
             const bool defer = lead && nm == 1 && wp.nrow == 0 && T <= kWin && defer_ok(l);   // (local) STRATA_DS4_DEFER
-            const bool defer_all = defer && defer_mode() != 2;   // (mode 2: the heavy part waited for and summed here as before)
+            const bool defer_all = defer && defer_mode() == 1;   // (modes 2/3: the heavy part waited for and summed here as before)
             if (T == 1 && moe_token_path) {
                 x3::MoeArgs ma;
                 ma.plan_ptr = d.plan_ptr;
@@ -14744,6 +14744,13 @@ struct Model::Impl {
             hc_post(d.moe_out, d.h, d.f_post, d.f_comb, D, H, T, d.h2, s);
             std::swap(d.h, d.h2);
             CK(cudaMemcpyAsync(d.pre, d.f_pre, (size_t) T * 8 * 4, cudaMemcpyDeviceToDevice, s));
+            if (pend_on && mi == 0 && defer_mode() == 3 && pend_il + 1 == l.il) {
+                // (local) STRATA_DS4_DEFER=3 (KTransformers' Expert Deferral): the previous layer's light experts, after this
+                // layer's MoE - through this layer's attention mixing and its FFN mixing (both since the part would have landed)
+                pend_on = false;
+                wait_seq(&pend_src[pend_slot].seq, pend_sq, s);
+                defer_add(d.h, pend_src + pend_slot, d.def_post, d.a_comb, D, H, pend_T, s, d.f_comb);
+            }
             if (defer) {   // (local) STRATA_DS4_DEFER: remember where this layer's CPU part lands and its f_post
                 CK(cudaMemcpyAsync(d.def_post, d.f_post, (size_t) T * 8 * 4, cudaMemcpyDeviceToDevice, s));
                 pend_on = true;

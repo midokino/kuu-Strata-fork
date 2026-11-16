@@ -251,7 +251,8 @@ void zc_stage(unsigned long long* plan, const int* idx, const unsigned long long
               cudaStream_t s);
 /// (local) STRATA_DS4_DEFER: the CPU-lane part of r (its flagged tokens) added into h late: sum_j comb[j][k] post[j] y
 /// into stream k (comb: the mixing applied since; null: post[k] y).  Wait for r->seq first.
-void defer_add(float* h, const Resp* r, const float* post, const float* comb, int dim, int hc, int T, cudaStream_t s);
+void defer_add(float* h, const Resp* r, const float* post, const float* comb, int dim, int hc, int T, cudaStream_t s,
+               const float* comb2 = nullptr);   // (comb2: a second mixing after comb - STRATA_DS4_DEFER=3)
 /// Waits (one thread, on the device) until *seq_ptr == seq.
 void wait_seq(const unsigned* seq_ptr, unsigned seq, cudaStream_t s);
 /// True once if the router (route / route_publish) had no pick to make on this device since the last call - every score it was
