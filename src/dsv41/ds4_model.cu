@@ -14348,7 +14348,8 @@ struct Model::Impl {
         const int D = g.dim, H = g.hc, HD = g.hd, NHL = l.ahn, HQ = NHL * HD, OG = l.ogn, FF = l.ffn;
         const ArGroup& ag = groups[(size_t) L0.grp].ar;
         const float* freqs = l.ratio ? d.freqs_comp : d.freqs_win;
-        if (pend_on && mi == 0 && l.il != pend_il + 1) {   // (local) a deferred part not taken by its next layer: add it as it was
+        static const bool defer_early = std::getenv("STRATA_DS4_DEFER_EARLY") != nullptr;   // (local) test: add it before the attention
+        if (pend_on && mi == 0 && (l.il != pend_il + 1 || defer_early)) {   // (local) a deferred part not taken by its next layer: add it as it was
             pend_on = false;
             wait_seq(&resps[pend_slot].seq, pend_sq, s);
             defer_add(d.h, resps + pend_slot, d.def_post, nullptr, D, H, pend_T, s);
