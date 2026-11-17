@@ -9838,6 +9838,24 @@ struct Model::Impl {
                         for (int i = 0; i < l.k_exp; ++i)
                             if (r.ids[t][i] >= 0 && r.ids[t][i] < l.n_exp) wsum += r.w[t][i];
                     char keep_anyway[32] = {};
+                    // (local) STRATA_DS4_ACE=1 (with STRATA_DS4_NORM_FILE): ACE's rule (arXiv 2609.05228) - a pick is light
+                    // only when it is under the threshold in both views, its share of the route weights and its share of
+                    // the weights x the experts' norm factors (each over the token's own picks), and never the token's
+                    // heaviest pick.  Off: weight x norm factor against the plain route sum, as before.
+                    static const bool ace = std::getenv("STRATA_DS4_ACE") != nullptr && std::atoi(std::getenv("STRATA_DS4_ACE")) != 0;
+                    float wsum_a = 0.0f;
+                    int top1 = -1;
+                    if (ace && (dsk || rsk))
+                        for (int i = 0; i < l.k_exp; ++i) {
+                            const int e = r.ids[t][i];
+                            if (e < 0 || e >= l.n_exp) continue;
+                            wsum_a += r.w[t][i] * nrm_factor(li, e);
+                            if (top1 < 0 || r.w[t][i] > r.w[t][top1]) top1 = i;
+                        }
+                    auto under = [&](int i, int e, float thr) {
+                        if (!ace) return r.w[t][i] * nrm_factor(li, e) < thr * wsum;
+                        return i != top1 && r.w[t][i] < thr * wsum && r.w[t][i] * nrm_factor(li, e) < thr * wsum_a;
+                    };
                     if (skip_budget > 0.0f && (dsk || rsk) && l.k_exp <= 32) {
                         float cand = 0.0f;
                         char is_c[32] = {};
@@ -9845,8 +9863,8 @@ struct Model::Impl {
                             const int e = r.ids[t][i];
                             if (e < 0 || e >= l.n_exp || l.slot[(size_t) e] >= 0) continue;
                             if (T == 1 && !l.zc.empty() && l.zc[(size_t) e]) continue;
-                            const bool lt = dsk && r.w[t][i] * nrm_factor(li, e) < dsk_w_t * wsum;
-                            if ((lt && !in_ram(l, e)) || (rsk && r.w[t][i] * nrm_factor(li, e) < ram_w_t * wsum)) {
+                            const bool lt = dsk && under(i, e, dsk_w_t);
+                            if ((lt && !in_ram(l, e)) || (rsk && under(i, e, ram_w_t))) {
                                 is_c[i] = 1;
                                 cand += r.w[t][i];
                             }
@@ -9872,7 +9890,7 @@ struct Model::Impl {
                             st.ahead_hit += (fl[e] & 6) != 0;
                             st.ahead_hit2 += (fl[e] >> 2) & 1;
                         }
-                        const bool light = dsk && r.w[t][i] * nrm_factor(li, e) < dsk_w_t * wsum;
+                        const bool light = dsk && under(i, e, dsk_w_t);
                         if (aon && !light) ++heavy;
                         if (l.rc_n > 0 && l.slot[(size_t) e] >= l.rc_base && l.slot[(size_t) e] < l.rc_base + l.rc_n)
                             l.rc_stamp[(size_t) (l.slot[(size_t) e] - l.rc_base)] = rc_clock.load(std::memory_order_relaxed);
@@ -9883,7 +9901,7 @@ struct Model::Impl {
                                 ++st.store_zc;
                                 continue;
                             }
-                            if (!keep_anyway[i] && ((light && !in_ram(l, e)) || (rsk && r.w[t][i] * nrm_factor(li, e) < ram_w_t * wsum))) {
+                            if (!keep_anyway[i] && ((light && !in_ram(l, e)) || (rsk && under(i, e, ram_w_t)))) {
                                 ++st.skipped;
                                 wlost += r.w[t][i];
                                 continue;
