@@ -825,6 +825,8 @@ struct Chunk {
     double dbg_stage_ms = 0, dbg_dma_ms = 0, dbg_evt_ms = 0;
     uint64_t it_file = 0, it_ram = 0, it_spec = 0, it_spec_unused = 0;
     uint64_t io_d0 = 0, io_b0 = 0;           // io's unbuffered / buffered bytes when the run started
+    double eg_ms0 = 0;                       // (local) Engram: the wait, read count and read time when the run started
+    int64_t eg_reads0 = 0, eg_io0 = 0, eg_rows0 = 0;
     double io_busy0 = 0;                     // io's busy time when the run started (DS4_PROF)
     bool buffered = false;                   // the run's reads all through the page cache (a short run: run_dev_chunks)
     // layer-major (a run of several chunks, every layer on this device): the layers one after another, each through
@@ -12588,6 +12590,10 @@ struct Model::Impl {
             c.lc_first = c.lc_chk = 0;
             c.io_d0 = c.io->direct_bytes();
             c.io_b0 = c.io->buffered_bytes();
+            c.eg_ms0 = st.engram_ms;
+            c.eg_reads0 = eg_reads_n.load();
+            c.eg_io0 = eg_io_ns.load();
+            c.eg_rows0 = eg_rows_n.load();
             c.io_busy0 = c.io->busy_ms();
             // (a short prompt's reads through the page cache, which keeps them for the decode after it - as the CPU
             // lane's reads in windows did: one V100, Maya-S from an NVMe, decode after 17 tokens 12.7 tokens/s read
@@ -13721,6 +13727,10 @@ struct Model::Impl {
                              (unsigned long long) c.it_file, fb, fb / std::max(1e-3, ms / 1000.0), db, bb,
                              (unsigned long long) c.it_ram, rb, lcs, (unsigned long long) c.it_spec,
                              (unsigned long long) c.it_spec_unused, c.wait_ms, dbgs);
+                std::fprintf(stderr, "ds4 prompt Engram (local): the compute waited %.0f ms for its rows; %lld rows, %lld read "
+                             "from the files (%.0f ms of read time on the helper threads)\n",
+                             st.engram_ms - c.eg_ms0, (long long) (eg_rows_n.load() - c.eg_rows0),
+                             (long long) (eg_reads_n.load() - c.eg_reads0), (double) (eg_io_ns.load() - c.eg_io0) / 1e6);
             }
         }
         if (pm.on && run.T.size() == 1 && took == n) {   // (the picks' spread for pick_path: the CPU-lane experts this run picked)
