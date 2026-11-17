@@ -2374,6 +2374,26 @@ void hc_post_inplace(const float* y, float* h, const float* post, const float* c
 #endif
     strata_ds4_launch(hc_post_inplace_kernel, dim3(cdiv(dim, kThreads), T), kThreads, 0, s, y, h, post, comb, dim, hc);
 }
+// (local) STRATA_DS4_DEFER=4: c[t][k] <- sum_j comb[t][j][k] c[t][j] - a deferred part's weights on the hc streams after one
+// more mixing (the part is rank one: c x y), so it can land any number of layers late exactly where it would have gone
+__global__ void defer_mix_kernel(float* c, const float* __restrict__ comb, int hc) {
+    const int t = blockIdx.x;
+    if (threadIdx.x != 0) return;
+    float v[8];
+    for (int j = 0; j < hc; ++j) v[j] = c[(size_t) t * 8 + j];
+    for (int kk = 0; kk < hc; ++kk) {
+        float a = 0.0f;
+        for (int j = 0; j < hc; ++j) a = __fmaf_rn(comb[(size_t) t * 64 + j * hc + kk], v[j], a);
+        c[(size_t) t * 8 + kk] = a;
+    }
+}
+void defer_mix(float* c, const float* comb, int hc, int T, cudaStream_t s) {
+#if defined(STRATA_METAL)
+    (void) c; (void) comb; (void) hc; (void) T; (void) s;
+#else
+    strata_ds4_launch(defer_mix_kernel, T, 32, 0, s, c, comb, hc);
+#endif
+}
 void defer_add(float* h, const Resp* r, const float* post, const float* comb, int dim, int hc, int T, cudaStream_t s,
                const float* comb2) {
 #if defined(STRATA_METAL)
