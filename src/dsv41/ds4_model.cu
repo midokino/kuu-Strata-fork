@@ -1475,6 +1475,13 @@ struct Model::Impl {
     unsigned seq_issued = 0;
     std::atomic<int> layer_of[kRing];
     std::atomic<int> spec_of[kRing];   // (local) 1: the request is a draft's verification window (spec_win)
+    // (local) STRATA_DS4_WIN_CUT: the verify window's rows still computed (the lane lowers it; verify() sets it to T and
+    // keeps its acceptance inside it), the chance each row is reached (the drafts' confidences multiplied) and the
+    // last draft()'s confidences
+    std::atomic<int> wc_live{kWin};
+    float wc_cum[kWin] = {}, wc_conf[kWin] = {};
+    int wc_nconf = 0;
+    long long wc_ver = 0, wc_cutw = 0, wc_rows = 0, wc_capped = 0;
     std::thread service;
     std::atomic<bool> quit{false};
     std::thread store_bg;   // the RAM store's fill beyond the first 48 GB, read after the model is ready (preload_store)
@@ -9712,6 +9719,8 @@ struct Model::Impl {
         unsigned next = 1;
         auto last = std::chrono::steady_clock::now();
         std::vector<Ent> ents;
+        int wc_prev = 1 << 30, wc_nl = 0;   // (WIN_CUT: the window's last layer seen, its layers counted)
+        float wc_sum[kWin] = {};            // (WIN_CUT: each row's new-expert cost summed over those layers)
         while (!quit.load(std::memory_order_relaxed)) {
             Req& r = reqs[next % kRing];
             if (*(volatile unsigned*) &r.seq != next) {
@@ -9804,7 +9813,22 @@ struct Model::Impl {
                 static const float d_ram_w = env_f("STRATA_DS4_DRAFT_RAM_W", 0.0f), d_dsk_w = env_f("STRATA_DS4_DRAFT_DISK_W", 0.0f);
                 static const bool d_all = std::getenv("STRATA_DS4_DRAFT_ALL") != nullptr;
                 const bool draft_win = T > 1 && (d_all || spec_of[next % kRing].load(std::memory_order_relaxed) != 0);
+                // (local) STRATA_DS4_WIN_CUT=K (0 off): a verify window's tail rows stop being computed on the CPU lane once
+                // their own new experts (those no earlier row of the window takes; RAM 1, not in RAM STRATA_DS4_WIN_CUT_DW)
+                // a layer, averaged over the layers so far and times the layers left, cost more than K x the chance the
+                // row is reached (the drafts before it all accepted).  verify() then accepts inside the rows left: the
+                // rows kept are computed as before, so the tokens are the model's own - only fewer drafts may be taken.
+                static const float wc_k = env_f("STRATA_DS4_WIN_CUT", 0.0f), wc_dw = env_f("STRATA_DS4_WIN_CUT_DW", 6.0f);
+                static const int wc_min = std::max(1, (int) env_f("STRATA_DS4_WIN_CUT_MIN", 2.0f));
+                const bool wc_on = wc_k > 0.0f && draft_win && !d_all && !l.mtp && li < g.nl;
+                if (wc_on && li <= wc_prev) {   // (a new window)
+                    wc_nl = 0;
+                    for (float& v : wc_sum) v = 0.0f;
+                }
+                if (wc_on) wc_prev = li;
+                const int wc_lv = wc_on ? std::max(1, std::min(T, wc_live.load(std::memory_order_relaxed))) : T;
                 for (int t = 0; t < T; ++t) {
+                    if (t >= wc_lv) continue;   // (WIN_CUT: a row cut at an earlier layer)
                     const bool drow = draft_win && t > 0;
                     const float ram_w_t = drow ? std::max(ram_skip_w, d_ram_w) : ram_skip_w;
                     const float dsk_w_t = drow ? std::max(disk_skip_w, d_dsk_w) : disk_skip_w;
@@ -9962,6 +9986,26 @@ struct Model::Impl {
                         picks.push_back(pk_);
                     }
                     a3_all += (long long) all.size();
+                }
+                if (wc_on && wc_lv > 1) {
+                    float cost[kWin] = {};
+                    for (size_t a = 0; a < picks.size(); ++a) {
+                        const int t = picks[a].second / kPicks, e = picks[a].first;
+                        bool seen = false;
+                        for (size_t b = 0; b < picks.size() && !seen; ++b) seen = picks[b].first == e && picks[b].second / kPicks < t;
+                        if (!seen) cost[t] += in_ram(l, e) ? 1.0f : wc_dw;
+                    }
+                    ++wc_nl;
+                    for (int t = 0; t < wc_lv; ++t) wc_sum[t] += cost[t];
+                    int lv = wc_lv;
+                    if (wc_nl >= wc_min)
+                        while (lv > 1 && wc_sum[lv - 1] / (float) wc_nl * (float) (g.nl - li) > wc_k * wc_cum[lv - 1]) --lv;
+                    if (lv < wc_lv) {
+                        wc_live.store(lv, std::memory_order_relaxed);
+                        picks.erase(std::remove_if(picks.begin(), picks.end(),
+                                                   [lv](const std::pair<int, int>& p_) { return p_.second / kPicks >= lv; }),
+                                    picks.end());
+                    }
                 }
                 if (aon) skip_auto_tick(li, T, heavy, cold, heavy_cpu);
                 if (disk_skip_auto && dsk_rule && !picks.empty()) {   // (the experts this answer leaves in RAM)
@@ -11513,6 +11557,8 @@ struct Model::Impl {
             }
             ++lz_rounds;
             lz_rows += made;
+            wc_nconf = std::min(nc, (int) kWin);
+            for (int i = 0; i < wc_nconf; ++i) wc_conf[i] = h_w[i];
         } else if (mk) {
             // the markov steps over the group: each member its rows of the bias and its share's argmax, every member
             // then the global one (the sampler's tie rule) and its E row - the same drafts as the lead's whole rows,
@@ -11858,6 +11904,16 @@ struct Model::Impl {
         int tk[kWin];
         tk[0] = y;
         for (int i = 0; i < n; ++i) tk[i + 1] = drafts[(size_t) i];
+        {   // (WIN_CUT: every row live, and the chance each is reached)
+            float c = 1.0f;
+            wc_cum[0] = 1.0f;
+            for (int t = 1; t < T; ++t) {
+                c *= t - 1 < wc_nconf ? wc_conf[t - 1] : 1.0f;
+                wc_cum[t] = c;
+            }
+            wc_nconf = 0;
+            wc_live.store(T, std::memory_order_relaxed);
+        }
         spec_win = true;
         const double tv = now_ms();
         const bool ok = forward(tk, T, T, err, 0);   // (a window streams nothing - the lane is a decoded token's)
@@ -11880,8 +11936,10 @@ struct Model::Impl {
 #endif
             CK(cudaMemcpyAsync(h_idx, d_ints + 16, (size_t) T * 4, cudaMemcpyDeviceToHost, hd.st));
             CK(cudaStreamSynchronize(hd.st));
-            while (m < n && h_idx[m] == drafts[(size_t) m]) ++m;
+            const int ne = std::max(1, std::min(T, wc_live.load(std::memory_order_relaxed))) - 1;   // (WIN_CUT: rows left)
+            while (m < ne && h_idx[m] == drafts[(size_t) m]) ++m;
             next = h_idx[m];
+            wc_note(n, ne, m);
         } else {
             // row i keeps draft i with probability min(1, p(d) / q(d)), else draws from the residual max(0, p - q)
             // (never d itself): each row a token distributed as the model's own draw at that position, p through the
@@ -11916,10 +11974,12 @@ struct Model::Impl {
 #endif
             CK(cudaMemcpyAsync(h_idx, d_ints + 16, (size_t) n * 4, cudaMemcpyDeviceToHost, hd.st));
             CK(cudaStreamSynchronize(hd.st));
-            while (m < n && h_idx[m] == drafts[(size_t) m]) ++m;
-            next = m < n ? h_idx[m]
-                         : sample_row(n, temperature, top_p, top_k, min_p, seed, counter + (uint64_t) n, nullptr,
-                                      p0 + 1 + n);
+            const int ne = std::max(1, std::min(T, wc_live.load(std::memory_order_relaxed))) - 1;   // (WIN_CUT: rows left)
+            while (m < ne && h_idx[m] == drafts[(size_t) m]) ++m;
+            next = m < ne ? h_idx[m]
+                          : sample_row(ne, temperature, top_p, top_k, min_p, seed, counter + (uint64_t) ne, nullptr,
+                                       p0 + 1 + ne);
+            wc_note(n, ne, m);
         }
         drafts_q = false;
         rollback(p0, T, m + 1);
@@ -11932,6 +11992,22 @@ struct Model::Impl {
             if (i < m) ++st.draft_kept[i];
         }
         return true;
+    }
+
+    // (local) WIN_CUT's counts: windows, those cut, the rows cut, the cut windows whose drafts were all taken up to the
+    // cut (the cut may have cost a token there); printed every 500 windows when the cut is on
+    void wc_note(int n, int ne, int m) {
+        static const bool on = env_f("STRATA_DS4_WIN_CUT", 0.0f) > 0.0f;
+        if (!on) return;
+        ++wc_ver;
+        if (ne < n) {
+            ++wc_cutw;
+            wc_rows += n - ne;
+            if (m == ne) ++wc_capped;
+        }
+        if (wc_ver % 500 == 0)
+            std::fprintf(stderr, "win_cut: %lld windows, %lld cut (%lld rows), %lld of them all accepted up to the cut\n",
+                         wc_ver, wc_cutw, wc_rows, wc_capped);
     }
 
     // a verified window keeps its first `keep` positions: the ring rows and the compressors' state of the rest undone
