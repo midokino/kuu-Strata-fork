@@ -1378,6 +1378,43 @@ struct Model::Impl {
     Resp* pend_src = nullptr;
     Resp* resps_late = nullptr;
     Resp* late_ans = nullptr;
+    // (local) ACE-style skip: STRATA_DS4_NORM_DUMP=<file> collects each CPU-lane expert's output norm (mean over its
+    // computations) and writes [nl][n_exp] float means + [nl][n_exp] float counts every 5000 requests; with
+    // STRATA_DS4_NORM_FILE=<file> the skip rules compare route weight x (the expert's mean norm / its layer's mean) instead of
+    // the route weight alone (experts never seen count as the layer's mean).
+    std::vector<double> nrm_sum, nrm_cnt;
+    long long nrm_req = 0;
+    std::vector<float> nrm_fac;
+    bool nrm_loaded = false;
+    float nrm_factor(int li, int e) {
+        if (!nrm_loaded) {
+            nrm_loaded = true;
+            const char* f = std::getenv("STRATA_DS4_NORM_FILE");
+            const size_t n = (size_t) g.nl * (size_t) g.n_exp;
+            if (f != nullptr) {
+                std::vector<float> a(2 * n, 0.0f);
+                if (std::FILE* fp = std::fopen(f, "rb")) {
+                    const size_t got = std::fread(a.data(), sizeof(float), 2 * n, fp);
+                    std::fclose(fp);
+                    if (got == 2 * n) {
+                        nrm_fac.assign(n, 1.0f);
+                        for (int l = 0; l < g.nl; ++l) {
+                            double sm = 0, cn = 0;
+                            for (int x = 0; x < g.n_exp; ++x)
+                                if (a[n + (size_t) l * g.n_exp + x] > 0) sm += a[(size_t) l * g.n_exp + x], cn += 1;
+                            const double mean = cn > 0 ? sm / cn : 1.0;
+                            for (int x = 0; x < g.n_exp; ++x)
+                                if (a[n + (size_t) l * g.n_exp + x] > 0 && mean > 0)
+                                    nrm_fac[(size_t) l * g.n_exp + x] = (float) (a[(size_t) l * g.n_exp + x] / mean);
+                        }
+                        std::fprintf(stderr, "ds4: (local) skip by route weight x expert norm, table %s" "%c", f, 10);
+                    } else std::fprintf(stderr, "ds4: (local) STRATA_DS4_NORM_FILE %s: wrong size, ignored%c", f, 10);
+                }
+            }
+        }
+        if (nrm_fac.empty() || li < 0 || li >= g.nl || e < 0 || e >= g.n_exp) return 1.0f;
+        return nrm_fac[(size_t) li * g.n_exp + e];
+    }
     std::atomic<int64_t> n_deferred{0};   // (light entries deferred, for the log)   // (the lane thread's: this request's late answer, its seq written after the heavy one)
     // STRATA_DS4_DEFER=4: the deferred part (the light experts by DEFER_W, or with STRATA_DS4_DEFER_COLD=1 the ones not in
     // RAM) lands STRATA_DS4_DEFER_K layers late (1-3), its stream weights carried through every mixing in between
@@ -9770,8 +9807,8 @@ struct Model::Impl {
                             const int e = r.ids[t][i];
                             if (e < 0 || e >= l.n_exp || l.slot[(size_t) e] >= 0) continue;
                             if (T == 1 && !l.zc.empty() && l.zc[(size_t) e]) continue;
-                            const bool lt = dsk && r.w[t][i] < dsk_w_t * wsum;
-                            if ((lt && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_w_t * wsum)) {
+                            const bool lt = dsk && r.w[t][i] * nrm_factor(li, e) < dsk_w_t * wsum;
+                            if ((lt && !in_ram(l, e)) || (rsk && r.w[t][i] * nrm_factor(li, e) < ram_w_t * wsum)) {
                                 is_c[i] = 1;
                                 cand += r.w[t][i];
                             }
@@ -9797,7 +9834,7 @@ struct Model::Impl {
                             st.ahead_hit += (fl[e] & 6) != 0;
                             st.ahead_hit2 += (fl[e] >> 2) & 1;
                         }
-                        const bool light = dsk && r.w[t][i] < dsk_w_t * wsum;
+                        const bool light = dsk && r.w[t][i] * nrm_factor(li, e) < dsk_w_t * wsum;
                         if (aon && !light) ++heavy;
                         if (l.rc_n > 0 && l.slot[(size_t) e] >= l.rc_base && l.slot[(size_t) e] < l.rc_base + l.rc_n)
                             l.rc_stamp[(size_t) (l.slot[(size_t) e] - l.rc_base)] = rc_clock.load(std::memory_order_relaxed);
@@ -9808,7 +9845,7 @@ struct Model::Impl {
                                 ++st.store_zc;
                                 continue;
                             }
-                            if (!keep_anyway[i] && ((light && !in_ram(l, e)) || (rsk && r.w[t][i] < ram_w_t * wsum))) {
+                            if (!keep_anyway[i] && ((light && !in_ram(l, e)) || (rsk && r.w[t][i] * nrm_factor(li, e) < ram_w_t * wsum))) {
                                 ++st.skipped;
                                 wlost += r.w[t][i];
                                 continue;
@@ -10048,6 +10085,30 @@ struct Model::Impl {
                             for (int e = 0; e < D; ++e) o[e] += wv[sl] * y[e];
                         }
                         rp.cpu[t] = 1;
+                    }
+                    static const char* nrm_dump = std::getenv("STRATA_DS4_NORM_DUMP");
+                    if (nrm_dump != nullptr && !l.mtp && li < g.nl) {   // (local) the experts' output norms
+                        const size_t n = (size_t) g.nl * (size_t) g.n_exp;
+                        if (nrm_sum.empty()) nrm_sum.assign(n, 0.0), nrm_cnt.assign(n, 0.0);
+                        for (const Ent& en : ents)
+                            for (int q = 0; q < en.n; ++q) {
+                                const float* y = c_yd.data() + (size_t) (en.slot0 + q) * D;
+                                double ss = 0;
+                                for (int e = 0; e < D; ++e) ss += (double) y[e] * y[e];
+                                nrm_sum[(size_t) li * g.n_exp + en.e] += std::sqrt(ss);
+                                nrm_cnt[(size_t) li * g.n_exp + en.e] += 1;
+                            }
+                        if (++nrm_req % 5000 == 0) {
+                            std::vector<float> a(2 * n);
+                            for (size_t x = 0; x < n; ++x) {
+                                a[x] = nrm_cnt[x] > 0 ? (float) (nrm_sum[x] / nrm_cnt[x]) : 0.0f;
+                                a[n + x] = (float) nrm_cnt[x];
+                            }
+                            if (std::FILE* fp = std::fopen(nrm_dump, "wb")) {
+                                std::fwrite(a.data(), sizeof(float), a.size(), fp);
+                                std::fclose(fp);
+                            }
+                        }
                     }
                     st.cpu_ms += now_ms() - tc;
                     st.cpu_experts += nslots;
