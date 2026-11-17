@@ -783,6 +783,7 @@ struct Chunk {
     uint8_t* eg_host[2] = {nullptr, nullptr};
     std::vector<uint8_t*> eg_ring;           // (local) STRATA_DS4_EG_RING=n: n slots of one (Engram layer, chunk) unit each
     std::vector<cudaEvent_t> eg_ring_ev;     //   (C rows), filled by one reader thread as far ahead as the slots allow
+    size_t eg_ring_bytes = 0;                //   (each slot's size: made again when the chunk grows - C is the run's)
     cudaEvent_t emb_ev[2] = {nullptr, nullptr}, eg_ev[2] = {nullptr, nullptr};
     double stream_bytes = 0;     // the experts streamed in, in all
     // the flow (a GGUF's in-place experts, every layer of the device on it alone; DS4_FLOW=0: the batches above): a
@@ -12488,6 +12489,12 @@ struct Model::Impl {
             }
         } eg_join{eg_stop, eg_th};
         if (eg_ring) {
+            if (c.eg_ring_bytes < c.C * eg_per) {   // (slots made for a smaller chunk: new ones - the old stay pinned until exit)
+                for (cudaEvent_t ev : c.eg_ring_ev) cudaEventSynchronize(ev);
+                c.eg_ring.clear();
+                c.eg_ring_ev.clear();
+                c.eg_ring_bytes = c.C * eg_per;
+            }
             while ((int) c.eg_ring.size() < eg_nr) {
                 uint8_t* p = nullptr;
                 if (!halloc(p, c.C * eg_per, err)) return false;
