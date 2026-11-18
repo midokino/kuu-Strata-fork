@@ -1,6 +1,8 @@
-# Strata DeepSeek fork (unofficial)
+# kuu-Strata
 
-An unofficial fork of [Strata](https://github.com/Niko1221/Strata) **v0.2.12** that keeps the DeepSeek-V4.1-Flash engine
+**DeepSeek-V4.1-Flash on one 12 GB GPU — an unofficial Strata fork**
+
+kuu-Strata is an unofficial fork of [Strata](https://github.com/Niko1221/Strata) **v0.2.12** that keeps the DeepSeek-V4.1-Flash engine
 (`src/dsv41`, `strata-dsv41.exe`) and tunes it for **one 12 GB GPU and 64 GB of RAM**. Upstream removed DeepSeek in
 0.2.14; this branch does not follow upstream after 0.2.12.
 
