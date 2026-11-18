@@ -1,5 +1,6 @@
 > **This is an unofficial fork of Strata v0.2.12 that keeps the DeepSeek-V4.1-Flash engine and tunes it for one 12 GB GPU + 64 GB RAM.**
 > What changed, the measurements and how to build it are in [FORK.md](FORK.md). The rest of this README is upstream's, as of 0.2.12.
+> The install links below are upstream's and install upstream Strata (which dropped DeepSeek in 0.2.14). To run this fork, build it from source: see [FORK.md](FORK.md).
 > Not affiliated with Strata; no support.
 
 <p align="center">
