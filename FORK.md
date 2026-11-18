@@ -57,7 +57,7 @@ Measured and **not** adopted (kept, off by default, so the numbers can be reprod
 | `STRATA_DS4_WIN_CUT` | drop a verify window's tail rows when their new experts cost more than their chance of being accepted | +0.4 % (the drafts were right 80+ % of the time where it cut) |
 | `STRATA_DS4_ACE=1`, `_NORM_DUMP`, `_NORM_FILE` | ACE-style skip (arXiv 2609.05228): weight × expert norm, both views, top-1 kept | no point beyond the plain rule's line |
 | `STRATA_DS4_DRAFT_RAM_W` / `_DRAFT_DISK_W` | higher skip thresholds on draft rows only | big quality loss |
-| others in `b8bff030` | routing / budget variants F1, F2, E2, A2, A3 | none beat the plain rule |
+| others in `4d3b2d3a` | routing / budget variants F1, F2, E2, A2, A3 | none beat the plain rule |
 
 A faster, lower-quality setting that measured well: `STRATA_DS4_DISK_SKIP_W=0.24` gives +18 % on "wide" and about
 28–31 tok/s on code at temperature 0, at KL 0.114 (English suffers most). It is not the default.
@@ -69,7 +69,7 @@ DeepSeek doc says the same for an RTX 3060). Forcing it on made code about 30 % 
 reading collapsed: a 4.6K-token prompt took 546 s. The drafter's 384 experts took VRAM first and left the trunk layers
 no slots, so the chunked prompt path could not borrow room. Requantizing the drafter to 2 bits did not help (a drafter
 expert is about as big as a trunk expert). The fix is an engine change: `DS4_MTP_VRAM_GB` caps the drafter's share of
-VRAM (commit `6f40f31f`). With 0.5 GB, the drafter stays on, code is +29 % and thinking +22 %, and prompt reads are what
+VRAM (commit `19cbf656`). With 0.5 GB, the drafter stays on, code is +29 % and thinking +22 %, and prompt reads are what
 they were. The IQ2_XXS drafter (next sections) then gives 1–2 GB of RAM back, which keeps long prompts fast when RAM is
 tight. DSpark acceptance is 86–88 %.
 
