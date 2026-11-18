@@ -1,214 +1,140 @@
-> **This is an unofficial fork of Strata v0.2.12 that keeps the DeepSeek-V4.1-Flash engine and tunes it for one 12 GB GPU + 64 GB RAM.**
-> What changed, the measurements and how to build it are in [FORK.md](FORK.md). The rest of this README is upstream's, as of 0.2.12.
-> The install links below are upstream's and install upstream Strata (which dropped DeepSeek in 0.2.14). To run this fork, build it from source: see [FORK.md](FORK.md).
-> Not affiliated with Strata; no support.
+# Strata DeepSeek fork (unofficial)
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
-    <img src="apps/host/public/brand/strata-lockup-light.svg" alt="Strata" width="340">
-  </picture>
-</p>
+An unofficial fork of [Strata](https://github.com/Niko1221/Strata) **v0.2.12** that keeps the DeepSeek-V4.1-Flash engine
+(`src/dsv41`, `strata-dsv41.exe`) and tunes it for **one 12 GB GPU and 64 GB of RAM**. Upstream removed DeepSeek in
+0.2.14; this branch does not follow upstream after 0.2.12.
 
-<h3 align="center">Run powerful AI on your own computer.</h3>
-<p align="center">Chat, code and work with images, locally.</p>
+It is a hobby project: one PC, measured carefully, no support. It is not affiliated with Strata, Project Maya,
+DeepSeek or ISTA-DASLab.
 
-<p align="center">
-  <a href="#models">Models</a> · <a href="#install"><b>Install</b></a> ·
-  <a href="#hardware">Hardware</a> · <a href="#tools">Tools</a> ·
-  <a href="#help">Help</a> · <a href="#support-strata">Support</a>
-</p>
+- **No binaries, no installer.** Build the engine from source ([Building](#building)) and run `serve/server.py` from
+  this checkout with a model config ([Settings on the reference PC](#settings-on-the-reference-pc)).
+- **Upstream's README** (the app, the installer, the other models) is kept as [README.upstream.md](README.upstream.md).
+  Its download links install the current upstream Strata, which no longer has DeepSeek.
+- The speedups are software only; the numbers below are from one PC and will differ on others.
 
-<p align="center">
-  <a href="https://github.com/Niko1221/Strata/releases/latest"><img src="https://img.shields.io/github/v/release/Niko1221/Strata?label=download&color=0ab887" alt="Download Strata"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Niko1221/Strata" alt="MIT license"></a>
-  <a href="https://github.com/sponsors/Niko1221"><img src="https://img.shields.io/badge/Sponsor-EA4AAA?logo=githubsponsors&logoColor=fff" alt="Sponsor Strata on GitHub Sponsors"></a>
-  <a href="https://buymeacoffee.com/strataengine"><img src="https://img.shields.io/badge/Buy_me_a_coffee-FFDD00?logo=buymeacoffee&logoColor=000" alt="Support Strata on Buy Me a Coffee"></a>
-</p>
+## Result on the reference PC
 
-<p align="center"><sub><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a> · <a href="README.pl.md">Polski</a></sub></p>
+Ryzen 7 9700X (105 W in BIOS) · RTX 5070 12 GB · DDR5-5600 64 GB (dual channel) · one PCIe 4.0 NVMe (Crucial P310 1 TB) ·
+Windows 11 · model: ISTA-DASLab DeepSeek-V4.1-Flash-1017 GSQ-RCO **IQ2_XS (2.25 bpw)**, 5 of 6 experts, DSpark drafter
+on, 128K context.
 
-**Free, open source, and yours to run.** Use Strata on your desktop or with your favorite coding tools. No account needed.
+| | upstream as installed (Strata 0.2.7, 10/29) | starting point (11/12: drafter on, 5 experts, nothing skipped) | this fork |
+|---|---|---|---|
+| short replies (4 kinds, averaged) | about 6.7 tok/s | 12.0 tok/s | 22–23 tok/s |
+| mixed long generations ("wide": prose, code, tool calls, translation, thinking) | — | about 10 tok/s | 20.6–21.6 tok/s |
+| code, temperature 0 | 4.6–4.9 tok/s | — | 24–27 tok/s |
+| prompt read, 4.6K tokens | 56–68 tok/s | 128 / 137 tok/s | 152 / 164 tok/s |
+| prompt read, 30K tokens | — | 414 / 431 tok/s | 490–544 tok/s |
+| quality: KL against the same model with 6 experts and nothing skipped (3 segments, 3,000 positions) | — | 0.036 | 0.057 (±0.005 between runs) |
 
-## Models
+The 10/29 column was measured while the engine inherited a low disk priority from the program that started it (upstream fixed
+that later, #4733), so its prompt reads are lower than they should be; upstream's own DeepSeek doc gives about 4.7 tok/s
+for an RTX 5070 with 64 GB of RAM, which matches its code speed. Generation speed moves 3–8 % from run to run; every comparison above was made against a baseline run in the same session.
 
-We recommend **ISTA-DASLab first**, then **Unsloth** and other providers, where a compatible model fits.
+**GPQA Diamond** (198 questions, the simple-evals / LightEval prompt, reasoning effort 50, temperature 1.0, 32,768
+tokens for thinking and answer, one run): *running, the result will be added here*. For reference, ISTA-DASLab's card
+gives 90.40 for this quant and 90.91 for the original model (their run count and sampling settings are not published).
+A first run on this fork had the server's thinking budget left at 4,000 tokens by a client setting and scored 83.8 %;
+re-asking only the questions it missed without that budget turned 17 of 32 into right answers (an upper-bound 92.4 %),
+so the skipping below does not appear to cost much on long reasoning.
 
-<details>
-<summary><img src="docs/media/models/qwen.svg" width="22" alt="" align="middle"> &nbsp;<b>Qwen3.8-Flash-Next</b></summary>
+## What changed (all in `src/dsv41`, environment variables, off unless set)
 
-| Provider | Choices |
-| --- | --- |
-| **ISTA-DASLab · recommended** | Q2\_0, IQ2\_XS, IQ3\_XXS, IQ3\_S. [Coder: IQ1\_M](docs/MODELS.md#coder) for coding. |
-| **Unsloth** | UD-IQ4\_XS, UD-Q4\_K\_XL, UD-Q5\_K\_XL, UD-Q6\_K\_XL, Q8\_0 |
-| **Gyro · agentionai** | [Gyro-S, Gyro-M](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-Gyro-GGUF). Lower memory use but slower. |
-| **Other options** | [Swift 1.5](docs/MODELS.md#swift-15), [NVFP4](docs/NVFP4.md), [OrcaRouter](docs/ORCA.md) |
+Adopted on the reference PC (the settings it runs with are at the end):
 
-[Compare sizes, memory needs and compatibility](docs/MODELS.md).
+| setting | what it does | measured |
+|---|---|---|
+| `STRATA_DS4_RAM_SKIP_W=0.10`, `STRATA_DS4_DISK_SKIP_W=0.20` (upstream switches) | leave out CPU-lane experts lighter than 10 % of the token's route weight, and those under 20 % that are not in RAM | the main speedup (12 → 20 tok/s); KL 0.036 → 0.064 |
+| `in_ram()` counts the RAM store | the disk rule sees the store's experts as in RAM | correctness; no speed change measured |
+| `STRATA_DS4_DROP_SHARDS=1` | close the expert shards' buffered file handles and views after load | prompt read +7–17 % (cached handles made unbuffered reads slow) |
+| `DS4_MTP_VRAM_GB` (cap, default unlimited) + `--dspark on` | caps the DSpark drafter's experts in VRAM so the trunk keeps room (0.5 GB used), so the drafter can stay on (see below) | code +29 %, thinking +22 %, prompt reads unchanged |
+| RAM store size classes per layer | the store's slots sized per layer instead of the largest layer's | more experts in the same RAM |
+| `STRATA_DS4_DSPARK_LAZY=1` (from Project Maya's `DS4_DSPARK_LAZY`) | the drafter head stops at the first draft the confidence cut drops | +2–5 %, identical output |
+| `STRATA_DS4_LM_AHEAD=1` | during a long prompt, read the next layer's likely experts ahead | 30K read +7 % |
+| `STRATA_DS4_ROUTER_BF16=1` (the idea of Project Maya's `MAYA_DS4_ROUTER_BF16`, own kernel) | keep the router in BF16 (as stored) instead of an F32 copy; same sums bit for bit | +19 experts in VRAM, identical output |
+| `STRATA_DS4_EG_RING=8` (after reading Xolotl's Engram prefetch) | the prompt path's Engram rows read ahead by a helper thread | 30K read +6 %, identical output |
+| `STRATA_DS4_SHARED_LEAST=128` etc. (server) | keep a short shared system prompt's start in the prefix cache | agent tool-approval turns 12 s → 6 s |
 
-</details>
+Measured and **not** adopted (kept, off by default, so the numbers can be reproduced):
 
-<details>
-<summary><img src="docs/media/models/qwen.svg" width="22" alt="" align="middle"> &nbsp;<b>Qwen3.6-35B-A3B</b></summary>
+| setting | idea | result |
+|---|---|---|
+| `STRATA_DS4_DEFER=1..4`, `_DEFER_W`, `_DEFER_K`, `_DEFER_COLD` | Expert Deferral (KTransformers, SOSP '25; Strata-xeno #254 tried the same first): light experts' output added one layer late so the CPU overlaps the GPU's attention; exact through DeepSeek's hyper-connection mixing | without drafts +11 % at KL +0.02; with DSpark drafts the gain halves and it lands on the same speed/KL line as a higher `DISK_SKIP_W` |
+| `STRATA_DS4_DEFER_BUDGET=1`, `_DEFER_US_MAX` | defer only what fits the CPU's idle time, the budget learned online (the paper's "saturate the CPU" rule) | KL 0.097 → 0.089 against plain deferral at the same cap, still on the same line |
+| `STRATA_DS4_WIN_CUT` | drop a verify window's tail rows when their new experts cost more than their chance of being accepted | +0.4 % (the drafts were right 80+ % of the time where it cut) |
+| `STRATA_DS4_ACE=1`, `_NORM_DUMP`, `_NORM_FILE` | ACE-style skip (arXiv 2609.05228): weight × expert norm, both views, top-1 kept | no point beyond the plain rule's line |
+| `STRATA_DS4_DRAFT_RAM_W` / `_DRAFT_DISK_W` | higher skip thresholds on draft rows only | big quality loss |
+| others in `4d3b2d3a` | routing / budget variants F1, F2, E2, A2, A3 | none beat the plain rule |
 
-**Unsloth:** UD-Q4_K_XL, UD-Q6_K_XL, Q8_0. These are the currently documented packs for this model.
+A faster, lower-quality setting that measured well: `STRATA_DS4_DISK_SKIP_W=0.24` gives +18 % on "wide" and about
+28–31 tok/s on code at temperature 0, at KL 0.114 (English suffers most). It is not the default.
 
-[Model guide and compatibility](docs/QWEN36.md).
+## Getting DSpark drafts on a 12 GB card
 
-</details>
+Upstream's `--dspark auto` measures a few answers at start and, on a 12 GB card, decides to leave the drafter off (the
+DeepSeek doc says the same for an RTX 3060). Forcing it on made code about 30 % and thinking 10–20 % faster, but prompt
+reading collapsed: a 4.6K-token prompt took 546 s. The drafter's 384 experts took VRAM first and left the trunk layers
+no slots, so the chunked prompt path could not borrow room. Requantizing the drafter to 2 bits did not help (a drafter
+expert is about as big as a trunk expert). The fix is an engine change: `DS4_MTP_VRAM_GB` caps the drafter's share of
+VRAM (commit `19cbf656`). With 0.5 GB, the drafter stays on, code is +29 % and thinking +22 %, and prompt reads are what
+they were. The IQ2_XXS drafter (next sections) then gives 1–2 GB of RAM back, which keeps long prompts fast when RAM is
+tight. DSpark acceptance is 86–88 %.
 
-<details>
-<summary><img src="docs/media/models/deepseek.svg" width="22" alt="" align="middle"> &nbsp;<b>DeepSeekV4.1-Flash-1017</b></summary>
+## Building
 
-In the **desktop app** and the **Terminal**. What does not fit in memory is read from your SSD, so it needs a lot of free
-disk space.
+Windows, CUDA 13, Visual Studio 2022 Build Tools, a llama.cpp checkout for ggml:
 
-| Set (ISTA-DAS) | Download | Free disk needed |
-| --- | ---: | ---: |
-| 1.75 bpw | 239 GB | about 245 GB |
-| 2.00 bpw | 257 GB | about 265 GB |
-| 2.25 bpw | 274 GB | about 280 GB |
-| ISTA-DAS Coder (half of the experts removed) | 191 GB | about 197 GB |
-
-Runs on NVIDIA RTX 30, 40 and 50 series (Windows and Linux), AMD Radeon AI PRO R9700 (Linux), AMD Ryzen AI Max — Strix Halo
-(Windows), and Apple Silicon Macs with 64 GB or more, text only ([Mac](docs/DEEPSEEK_MAC.md)). Setup downloads the files and the DeepSeek engine, then starts the model.
-
-```sh
-strata launch --family deepseek41 --model ist-das-2.00bpw --plan
+```bat
+set STRATA_GGML_DIR=C:/path/to/llama.cpp
+set DSV41_ARCH=120-real
+packaging\build_dsv41_windows.bat C:/path/to/build-dir
 ```
 
-Measured with the 2.00 bpw set on Strata 0.2.5 (Strix Halo: 0.2.7). Output is the speed of the answer, prompt is how fast Strata reads your input.
+Copy `strata-dsv41.exe` into a folder next to the release engine's DLLs (`cublas64_13.dll`, `cublasLt64_13.dll`) and point
+the model config's `exe` / `lib_dirs` at it.
 
-| Hardware | Output | Prompt |
-| --- | ---: | ---: |
-| RTX 5070 12 GB, 64 GB RAM | 4 to 6 tokens/s | about 110 tokens/s (4K) |
-| RTX 3060 12 GB, 46 GB RAM | 9 to 11 tokens/s | about 155 tokens/s (4K) |
-| 1x Radeon AI PRO R9700, 251 GB RAM | 21 to 25 tokens/s | 320 to 360 tokens/s (8K) |
-| 4x Radeon AI PRO R9700 | 74 to 77 tokens/s | 400 to 450 tokens/s (8K) |
-| Ryzen AI Max+ 395 (Strix Halo), 128 GB unified | 19 to 21 tokens/s (code), 11 (chat) | 87 tokens/s (4K), 125 tokens/s (8K) |
+## The DSpark drafter in IQ2_XXS
 
-[Memory, disk and details](docs/DEEPSEEK41.md) · [Release notes](https://github.com/Niko1221/Strata/releases)
+The 8 GB Q8_0 drafter leaves too little RAM on a 64 GB machine. Requantizing DeepSeek's own drafter (the three shards
+`model-00044..46-of-00048` of the official checkpoint) keeps the acceptance rate (86–88 %) and frees 1–2 GB:
 
-</details>
-
-<a id="the-other-sizes"></a>
-
-Not sure what fits? [Choose a model for your computer](docs/MODELS.md#pick-by-memory).
-
-## Install
-
-<a id="option-a-the-strata-app"></a>
-
-### Desktop app
-
-**[Download Strata for Windows, Linux or Mac →](https://github.com/Niko1221/Strata/releases/latest)**
-
-Install the app, choose a model, and start chatting. There is one installer for each system. On first start the app
-downloads the engine for your graphics card. [Help with the installer](docs/INSTALL.md#the-app).
-
-<sub>Files: `Strata-0.2.9-windows-x64-setup.exe` · `Strata-0.2.9-linux-x86_64.AppImage` · `Strata-0.2.9-macos-arm64.dmg`</sub>
-
-<p align="center">
-  <img src="docs/media/app-chat.png" width="900" alt="Strata desktop app with a chat and live code preview side by side">
-  <br><sub>Chat, files and a live preview in one window.</sub>
-</p>
-
-<a id="option-b-the-terminal-one-line"></a>
-
-### Terminal app
-
-Prefer the terminal? Install Strata, then run **`strata launch`**.
-
-<details open>
-<summary><b>Install commands</b></summary>
-
-**Linux / Mac**
-
-```sh
-curl -fsSL https://github.com/Niko1221/Strata/releases/latest/download/install.sh -o install.sh && sh install.sh
+```bat
+python tools\dsv41\drafter_pack.py --dir <folder with the three shards>
+python tools\dsv41\drafter_pack.py --dir <same folder> --requant iq2 --experts IQ2_XXS --dense Q8_0 --lib <llama.cpp>\ggml-base.dll --jobs 12
 ```
 
-**Windows PowerShell**
+Then build a pack with it (`pack_gguf.py --drafter`) and copy the six `dspark_*` lines of `ds4.txt` from a working pack:
+`pack_gguf.py --drafter` writes them as 0 and the drafter is then silently not loaded.
 
-```powershell
-irm https://github.com/Niko1221/Strata/releases/latest/download/install.ps1 | iex
+## Settings on the reference PC
+
+```json
+"args": ["--max-context", "131072", "--eos", "1", "--vision", "off", "--dspark", "on", "--dspark-conf", "0.65", "--reserve-mib", "200"],
+"env": {
+  "DS4_MTP_VRAM_GB": "0.5",
+  "STRATA_DS4_DISK_SKIP_W": "0.20",
+  "STRATA_DS4_RAM_SKIP_W": "0.10",
+  "STRATA_DS4_DROP_SHARDS": "1",
+  "STRATA_DS4_DSPARK_LAZY": "1",
+  "STRATA_DS4_LM_AHEAD": "1",
+  "STRATA_DS4_ROUTER_BF16": "1",
+  "STRATA_DS4_EG_RING": "8"
+}
 ```
 
-On Windows, open a new terminal afterwards. Then:
+`--reserve-mib 200` and the 105 W BIOS setting depend on the machine: below 150 MiB the reference PC's VRAM spilled into
+shared memory, which Windows does silently (slower, no error).
 
-```sh
-strata launch
-```
+## Credits
 
-Follow the prompts to download and start a model. [Terminal guide](docs/TERMINAL_LAUNCH.md).
-
-</details>
-
-<p align="center">
-  <img src="docs/media/terminal-monitor.png" width="900" alt="Strata terminal app showing model activity, speed, memory and recent requests">
-  <br><sub>Watch your model and hardware while it runs.</sub>
-</p>
-
-<a id="build-from-source"></a>
-
-[Build from source](docs/SOURCE_INSTALL.md) · [Docker](docs/DOCKER.md) · [Full install guide](docs/INSTALL.md)
-
-<a id="what-you-need"></a>
-
-## Hardware
-
-| Supported hardware | Guide |
-| --- | --- |
-| **NVIDIA GeForce RTX 20 / 30 / 40 / 50 series** | [NVIDIA setup](docs/INSTALL.md#what-you-need) |
-| **AMD Radeon RX 7700 / 7800 / 7900, RX 9060 / 9070, AI PRO R9700** | [AMD setup](docs/AMD_HIP.md) |
-| **AMD Radeon RX 6800 / 6900 · experimental** | [RX 6000 setup](docs/AMD_HIP.md#rdna2-gfx1030) |
-| **Intel Arc · Linux** | [Intel setup](docs/INTEL_ARC.md) |
-| **Apple Silicon · M1 or newer** | [Mac setup](docs/MAC.md) |
-| **AMD Ryzen AI Max · Strix Halo** | [Strix Halo setup](docs/STRIX_HALO.md) |
-| **NVIDIA DGX Spark · Linux** | [DGX Spark setup](docs/DGX_SPARK_LINUX.md) |
-
-<a id="using-it"></a>
-
-## Tools
-
-**Claude Code · Codex CLI · OpenCode · oh-my-pi · pi.dev · Hermes Agent · OpenClaw**, and more through the OpenAI- and Anthropic-compatible APIs.
-
-Run **`strata connect`** to see setup instructions for your tool. [Connection guide](docs/TERMINAL_LAUNCH.md#connect-your-apps-strata-connect).
-
-<a id="guides"></a>
-<a id="how-fast-is-it"></a>
-<a id="how-does-it-work"></a>
-<a id="something-went-wrong"></a>
-
-## Help
-
-[All guides](docs) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Report a bug](https://github.com/Niko1221/Strata/issues/new/choose) ·
-[Benchmarks](docs/COMMUNITY_BENCHMARKS.md) · [How it works](docs/HOW_IT_WORKS.md) · [Contribute](CONTRIBUTING.md)
-
-## Support Strata
-
-**Help keep local AI open to everyone.** A GitHub sponsorship or a coffee helps fund development and testing on more hardware.
-
-<a href="https://github.com/sponsors/Niko1221"><img src="https://img.shields.io/badge/Sponsor_on_GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="GitHub Sponsors: sponsor Strata" height="48"></a>
-<a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee: support Strata" height="48"></a>
-
-### Loyal supporters
-
-Thank you to everyone who supports Strata.
-
-<!-- supporters:start (one line per public supporter, newest last; copy a line and change the GitHub name in all four places) -->
-<a href="https://github.com/ryan4yin"><img src="https://github.com/ryan4yin.png?size=96" width="48" height="48" alt="ryan4yin" title="ryan4yin"></a>
-<a href="https://github.com/themactep"><img src="https://github.com/themactep.png?size=96" width="48" height="48" alt="themactep" title="themactep"></a>
-<a href="https://github.com/macintog"><img src="https://github.com/macintog.png?size=96" width="48" height="48" alt="macintog" title="macintog"></a>
-<a href="https://github.com/bisonbet"><img src="https://github.com/bisonbet.png?size=96" width="48" height="48" alt="bisonbet" title="bisonbet"></a>
-<a href="https://github.com/vizv"><img src="https://github.com/vizv.png?size=96" width="48" height="48" alt="vizv" title="vizv"></a>
-<!-- supporters:end -->
-
-[MIT license](LICENSE) · [Credits and model licenses](docs/HOW_IT_WORKS.md#credits) · [Privacy](docs/SAFETY.md)
-
-<a id="option-c-let-your-ai-set-it-up"></a>
-
-<sub>For AI tools and automated readers: <a href="AGENTS.md">technical reference</a> · <a href="docs/AI_SETUP.md">setup instructions</a>.</sub>
-
-**Sponsorships, hardware partnerships or collaborations:** [niko.veit@outlook.com](mailto:niko.veit@outlook.com).
-
+- [Strata](https://github.com/Niko1221/Strata) by Niko1221 and the Strata contributors (MIT) — the engine this is built on.
+- [Project Maya](https://github.com/mw00/project-maya) by Peasant Smith and the Project Maya contributors (MIT) — the lazy
+  drafter head, the BF16 router and several ideas measured here; see `NOTICE`.
+- [Xolotl](https://github.com/Indras-Mirror/Xolotl) — the Engram prefetch idea; [Strata-xeno](https://github.com/xenodeve/Strata-xeno)
+  — an earlier Expert Deferral attempt (#254).
+- DeepSeek-V4.1-Flash by DeepSeek (MIT); the GSQ-RCO quants by ISTA-DASLab; the DSpark drafter GGUF by Unsloth.
+- Papers: H. Chen et al., *KTransformers: Unleashing the Full Potential of CPU/GPU Hybrid Inference for MoE Models*,
+  SOSP '25 (Expert Deferral); *ACE* (arXiv 2609.05228); EcoSpec (arXiv 2607.12696) and DraftExpert (arXiv 2607.24434)
+  for the window cut.
+- Written together with Claude (Anthropic); the commits say so.
