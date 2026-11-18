@@ -9720,6 +9720,17 @@ struct Model::Impl {
         auto last = std::chrono::steady_clock::now();
         std::vector<Ent> ents;
         int wc_prev = 1 << 30, wc_nl = 0;   // (WIN_CUT: the window's last layer seen, its layers counted)
+        // (local) STRATA_DS4_DEFER_BUDGET=1 (with STRATA_DS4_DEFER=3): the light entries deferred are the lightest ones
+        // whose estimated compute fits a budget of microseconds, and the budget follows the lane's own idle time: after
+        // a deferred part the lane either waits for the next layer's request (the budget grows by half the wait) or
+        // finds it already there (the GPU waited: the budget shrinks 10%).  KTransformers' rule (SOSP'25 4.2): defer
+        // only what saturates the CPU - more gives no speed and costs quality.
+        double db_us = env_f("STRATA_DS4_DEFER_US", 250.0f);   // the budget
+        double db_unit = 40.0;                                  // estimated us a deferred entry unit (RAM 1, SSD _SSDX)
+        bool db_watch = false, db_over = false;
+        int db_li = -1;
+        double db_t = 0.0;
+        long long db_n = 0, db_grow = 0, db_shrink = 0, db_lay = 0, db_def = 0, db_elig = 0;
         float wc_sum[kWin] = {};            // (WIN_CUT: each row's new-expert cost summed over those layers)
         while (!quit.load(std::memory_order_relaxed)) {
             Req& r = reqs[next % kRing];
@@ -9748,6 +9759,19 @@ struct Model::Impl {
             std::atomic_thread_fence(std::memory_order_acquire);
             const int li = layer_of[next % kRing].load(std::memory_order_acquire);
             Resp& rp = resps[next % kRing];
+            if (db_watch) {   // (DEFER_BUDGET: only a request for the layer right after the deferred one says something)
+                db_watch = false;
+                if (li == db_li + 1) {
+                    if (db_over) {
+                        db_us *= 0.9;
+                        ++db_shrink;
+                    } else {
+                        db_us += 0.5 * (now_ms() - db_t) * 1000.0;
+                        ++db_grow;
+                    }
+                    db_us = std::max(0.0, std::min(db_us, 20000.0));
+                }
+            }
             const int T = std::max(1, std::min(kWin, r.T));
             for (int t = 0; t < T; ++t) rp.cpu[t] = 0;
             for (int t = 0; t < kWin; ++t) rp.scale[t] = 1.0f;
@@ -10100,15 +10124,41 @@ struct Model::Impl {
                         for (int i = 0; i < l.k_exp; ++i) wsum[t] += r.w[t][i];
                     }
                     std::vector<Ent> hv, lg;
-                    for (const Ent& en : ents) {
+                    static const bool db_on = std::getenv("STRATA_DS4_DEFER_BUDGET") != nullptr &&
+                                              std::atoi(std::getenv("STRATA_DS4_DEFER_BUDGET")) != 0;
+                    static const float db_ssdx = env_f("STRATA_DS4_DEFER_SSDX", 4.0f);
+                    std::vector<std::pair<float, int>> elig;   // (DEFER_BUDGET: (heaviest share, entry) of the light ones)
+                    for (int q0 = 0; q0 < (int) ents.size(); ++q0) {
+                        const Ent& en = ents[(size_t) q0];
                         bool light = true;
+                        float mx = 0.0f;
                         if (defer_cold()) light = !in_ram(l, en.e);   // (STRATA_DS4_DEFER_COLD: the ones the SSD has to bring)
                         else
                             for (int q = 0; q < en.n; ++q) {
                                 const int sl = en.slot0 + q;
                                 light = light && wv[sl] < dw * wsum[tok_of[sl]];
+                                mx = std::max(mx, wsum[tok_of[sl]] > 0.0f ? wv[sl] / wsum[tok_of[sl]] : 1.0f);
                             }
-                        (light ? lg : hv).push_back(en);
+                        if (db_on && light) elig.push_back({mx, q0});
+                        else (light ? lg : hv).push_back(en);
+                    }
+                    double lg_units = 0.0;
+                    if (db_on) {   // the lightest first, while their estimated compute fits the budget
+                        std::sort(elig.begin(), elig.end());
+                        double cost = 0.0;
+                        for (const auto& pe : elig) {
+                            const Ent& en = ents[(size_t) pe.second];
+                            const double u = (file_read(l, en.e) ? db_ssdx : 1.0) * std::max(1, en.n);
+                            if (cost + u * db_unit <= db_us) {
+                                cost += u * db_unit;
+                                lg_units += u;
+                                lg.push_back(en);
+                            } else
+                                hv.push_back(en);
+                        }
+                        ++db_lay;
+                        db_def += (long long) lg.size();
+                        db_elig += (long long) elig.size();
                     }
                     const int D = g.dim;
                     auto sum_into = [&](Resp& out, const std::vector<Ent>& es) {
@@ -10135,8 +10185,20 @@ struct Model::Impl {
                     sum_into(rp, hv);
                     std::atomic_thread_fence(std::memory_order_release);
                     *(volatile unsigned*) &rp.seq = next;   // (the device goes on with the heavy part)
+                    const double tl0 = now_ms();
                     if (!lg.empty()) cpu_experts(l, &r.x[0][0], lg, (size_t) kMaxDim, nullptr);
                     sum_into(*late_ans, lg);
+                    if (db_on) {   // (DEFER_BUDGET: the unit cost learned, the next request watched)
+                        if (lg_units > 0.0) db_unit = 0.95 * db_unit + 0.05 * ((now_ms() - tl0) * 1000.0 / lg_units);
+                        db_watch = true;
+                        db_li = li;
+                        db_t = now_ms();
+                        db_over = *(volatile unsigned*) &reqs[(next + 1) % kRing].seq == next + 1;
+                        if (++db_n % 20000 == 0)
+                            std::fprintf(stderr, "defer budget: %.0f us (unit %.1f us), %.2f of %.2f light entries a layer deferred, "
+                                         "%lld grows / %lld shrinks\n", db_us, db_unit, db_lay ? (double) db_def / db_lay : 0.0,
+                                         db_lay ? (double) db_elig / db_lay : 0.0, db_grow, db_shrink);
+                    }
                     lt.c_ms = now_ms() - tc;
                     lt.n_cpu = (int) ents.size();
                     st.cpu_ms += now_ms() - tc;
