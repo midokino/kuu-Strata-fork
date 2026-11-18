@@ -9725,7 +9725,7 @@ struct Model::Impl {
         // a deferred part the lane either waits for the next layer's request (the budget grows by half the wait) or
         // finds it already there (the GPU waited: the budget shrinks 10%).  KTransformers' rule (SOSP'25 4.2): defer
         // only what saturates the CPU - more gives no speed and costs quality.
-        double db_us = env_f("STRATA_DS4_DEFER_US", 250.0f);   // the budget
+        double db_us = std::min(env_f("STRATA_DS4_DEFER_US", 250.0f), env_f("STRATA_DS4_DEFER_US_MAX", 20000.0f));   // the budget
         double db_unit = 40.0;                                  // estimated us a deferred entry unit (RAM 1, SSD _SSDX)
         bool db_watch = false, db_over = false;
         int db_li = -1;
@@ -9769,7 +9769,8 @@ struct Model::Impl {
                         db_us += 0.5 * (now_ms() - db_t) * 1000.0;
                         ++db_grow;
                     }
-                    db_us = std::max(0.0, std::min(db_us, 20000.0));
+                    static const double db_max = env_f("STRATA_DS4_DEFER_US_MAX", 20000.0f);   // (a ceiling on the budget)
+                    db_us = std::max(0.0, std::min(db_us, db_max));
                 }
             }
             const int T = std::max(1, std::min(kWin, r.T));
