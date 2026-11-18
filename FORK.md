@@ -40,7 +40,7 @@ Adopted on the reference PC (the settings it runs with are at the end):
 | `STRATA_DS4_RAM_SKIP_W=0.10`, `STRATA_DS4_DISK_SKIP_W=0.20` (upstream switches) | leave out CPU-lane experts lighter than 10 % of the token's route weight, and those under 20 % that are not in RAM | the main speedup (12 → 20 tok/s); KL 0.036 → 0.064 |
 | `in_ram()` counts the RAM store | the disk rule sees the store's experts as in RAM | correctness; no speed change measured |
 | `STRATA_DS4_DROP_SHARDS=1` | close the expert shards' buffered file handles and views after load | prompt read +7–17 % (cached handles made unbuffered reads slow) |
-| `DS4_MTP_VRAM_GB` (cap, default unlimited) | caps the DSpark drafter's experts in VRAM so the trunk keeps room; 0.5 used | prompts no longer collapse with the drafter on |
+| `DS4_MTP_VRAM_GB` (cap, default unlimited) + `--dspark on` | caps the DSpark drafter's experts in VRAM so the trunk keeps room (0.5 GB used), so the drafter can stay on (see below) | code +29 %, thinking +22 %, prompt reads unchanged |
 | RAM store size classes per layer | the store's slots sized per layer instead of the largest layer's | more experts in the same RAM |
 | `STRATA_DS4_DSPARK_LAZY=1` (from Project Maya's `DS4_DSPARK_LAZY`) | the drafter head stops at the first draft the confidence cut drops | +2–5 %, identical output |
 | `STRATA_DS4_LM_AHEAD=1` | during a long prompt, read the next layer's likely experts ahead | 30K read +7 % |
@@ -61,6 +61,17 @@ Measured and **not** adopted (kept, off by default, so the numbers can be reprod
 
 A faster, lower-quality setting that measured well: `STRATA_DS4_DISK_SKIP_W=0.24` gives +18 % on "wide" and about
 28–31 tok/s on code at temperature 0, at KL 0.114 (English suffers most). It is not the default.
+
+## Getting DSpark drafts on a 12 GB card
+
+Upstream's `--dspark auto` measures a few answers at start and, on a 12 GB card, decides to leave the drafter off (the
+DeepSeek doc says the same for an RTX 3060). Forcing it on made code about 30 % and thinking 10–20 % faster, but prompt
+reading collapsed: a 4.6K-token prompt took 546 s. The drafter's 384 experts took VRAM first and left the trunk layers
+no slots, so the chunked prompt path could not borrow room. Requantizing the drafter to 2 bits did not help (a drafter
+expert is about as big as a trunk expert). The fix is an engine change: `DS4_MTP_VRAM_GB` caps the drafter's share of
+VRAM (commit `6f40f31f`). With 0.5 GB, the drafter stays on, code is +29 % and thinking +22 %, and prompt reads are what
+they were. The IQ2_XXS drafter (next sections) then gives 1–2 GB of RAM back, which keeps long prompts fast when RAM is
+tight. DSpark acceptance is 86–88 %.
 
 ## Building
 
