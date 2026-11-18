@@ -1,6 +1,6 @@
-> **This is upstream Strata's README as of v0.2.12, kept unchanged for reference.** This repository is an unofficial
+> **This is upstream Strata's README as of v0.2.12, kept for reference** (only the language links were removed). This repository is an unofficial
 > DeepSeek fork: see [README.md](README.md). The download links and buttons below are upstream's and install the current
-> upstream Strata, which no longer has DeepSeek (removed in 0.2.14). The translated READMEs are upstream's too.
+> upstream Strata, which no longer has DeepSeek (removed in 0.2.14). The translations are in the upstream repository.
 
 <p align="center">
   <picture>
@@ -25,7 +25,6 @@
   <a href="https://buymeacoffee.com/strataengine"><img src="https://img.shields.io/badge/Buy_me_a_coffee-FFDD00?logo=buymeacoffee&logoColor=000" alt="Support Strata on Buy Me a Coffee"></a>
 </p>
 
-<p align="center"><sub><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a> · <a href="README.pl.md">Polski</a></sub></p>
 
 **Free, open source, and yours to run.** Use Strata on your desktop or with your favorite coding tools. No account needed.
 
