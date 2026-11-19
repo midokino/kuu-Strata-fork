@@ -17,6 +17,8 @@ DeepSeek or ISTA-DASLab.
 
 ## Result on the reference PC
 
+![Memory layout and speed on the reference PC](docs/img/kuu-strata-summary.png)
+
 Ryzen 7 9700X (105 W in BIOS) · RTX 5070 12 GB · DDR5-5600 64 GB (dual channel) · one PCIe 4.0 NVMe (Crucial P310 1 TB) ·
 Windows 11 · model: ISTA-DASLab DeepSeek-V4.1-Flash-1017 GSQ-RCO **IQ2_XS (2.25 bpw)**, 5 of 6 experts, DSpark drafter
 on, 128K context.
@@ -33,6 +35,8 @@ on, 128K context.
 The 10/29 column was measured while the engine inherited a low disk priority from the program that started it (upstream fixed
 that later, #4733), so its prompt reads are lower than they should be; upstream's own DeepSeek doc gives about 4.7 tok/s
 for an RTX 5070 with 64 GB of RAM, which matches its code speed. Generation speed moves 3–8 % from run to run; every comparison above was made against a baseline run in the same session.
+
+![GPQA Diamond: this fork against ISTA-DASLab's numbers](docs/img/kuu-strata-gpqa.png)
 
 **GPQA Diamond** (198 questions, the simple-evals / LightEval prompt, reasoning effort 50, temperature 1.0, 32,768
 tokens for thinking and answer, no separate thinking budget, the adopted settings below, one run): **89.4 %** (177/198;
