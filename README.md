@@ -35,11 +35,15 @@ that later, #4733), so its prompt reads are lower than they should be; upstream'
 for an RTX 5070 with 64 GB of RAM, which matches its code speed. Generation speed moves 3–8 % from run to run; every comparison above was made against a baseline run in the same session.
 
 **GPQA Diamond** (198 questions, the simple-evals / LightEval prompt, reasoning effort 50, temperature 1.0, 32,768
-tokens for thinking and answer, one run): *running, the result will be added here*. For reference, ISTA-DASLab's card
-gives 90.40 for this quant and 90.91 for the original model (their run count and sampling settings are not published).
-A first run on this fork had the server's thinking budget left at 4,000 tokens by a client setting and scored 83.8 %;
-re-asking only the questions it missed without that budget turned 17 of 32 into right answers (an upper-bound 92.4 %),
-so the skipping below does not appear to cost much on long reasoning.
+tokens for thinking and answer, no separate thinking budget, the adopted settings below, one run): **89.4 %** (177/198;
+95 % interval 84.3–93.0 %; physics 94.2 %, chemistry 87.1 %, biology 78.9 %; 20 questions had their thinking closed near
+the token limit, 10 of them still right). For reference, ISTA-DASLab's card gives 90.40 for this quant and 90.91 for the
+original model (their run count and sampling settings are not published); one question's difference is well inside a
+single run's noise, so the skipping below shows no measurable cost here, though one run cannot rule out a 1–2 point loss.
+
+Two other runs, for context: with the server's thinking budget left at 4,000 tokens by a client setting, the same setup
+scored 83.8 %; re-asking only that run's 32 misses without the budget turned 17 into right answers (92.4 %, an upper
+bound, since re-asking only the misses also recovers the ones lost by chance).
 
 ## What changed (all in `src/dsv41`, environment variables, off unless set)
 
