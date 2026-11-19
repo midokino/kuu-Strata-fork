@@ -83,6 +83,23 @@ VRAM (commit `19cbf656`). With 0.5 GB, the drafter stays on, code is +29 % and t
 they were. The IQ2_XXS drafter (next sections) then gives 1–2 GB of RAM back, which keeps long prompts fast when RAM is
 tight. DSpark acceptance is 86–88 %.
 
+## Where the changes are
+
+The rest of the tree is upstream Strata v0.2.12 as released (`146df3c4`), apart from the READMEs and upstream's GitHub
+automation (workflows, issue templates, funding links), which were removed, and four upstream tests adjusted to match. The engine changes are in 12 files:
+
+- `src/dsv41/`: `ds4_model.cu` (most of it), `ds4_store.hpp`, `ds4_kernels.cu` / `.cuh`, `ds4_os.hpp`, `ds4_gg_cpu.cpp`,
+  `ds4_gguf.cu`, `ds4_pool.hpp`, `ds4_model.hpp`, `ds4_main.cpp`
+- `serve/server.py` (the shared system-prompt cache settings), `tools/dsv41/drafter_pack.py` (IQ1 requant options)
+
+To see them against upstream:
+
+```sh
+git remote add upstream https://github.com/Niko1221/Strata
+git fetch upstream tag v0.2.12 --no-tags
+git diff v0.2.12 main -- src serve tools
+```
+
 ## Building
 
 Windows, CUDA 13, Visual Studio 2022 Build Tools, a llama.cpp checkout for ggml:

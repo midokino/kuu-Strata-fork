@@ -706,6 +706,7 @@ class HipArchSources(unittest.TestCase):
         for arch in ("gfx1201", "gfx1200", "gfx1100", "gfx1101", "gfx1102", "gfx1103"):
             self.assertIn('"%s"' % arch, model)
 
+    @unittest.skip("fork: upstream's .github folder (workflows, issue templates) was removed")
     def test_the_issue_template_exists_and_the_engine_line_points_at_it(self):
         tpl = ROOT / ".github" / "ISSUE_TEMPLATE" / "amd_split_report.yml"
         self.assertTrue(tpl.is_file())

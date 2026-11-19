@@ -1,3 +1,7 @@
+> **This file is upstream Strata's (v0.2.12), kept because upstream's docs link to it.** Its rules and bots are
+> upstream's. This fork (see [README.md](README.md)) has no support and no review process; issues are read when there
+> is time.
+
 # Contributing to Strata
 
 **AI assistance is welcome. The contributor is responsible for understanding the change and supplying real evidence.**

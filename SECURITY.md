@@ -1,3 +1,7 @@
+> **This file is upstream Strata's (v0.2.12), kept because upstream's docs link to it.** It describes upstream's
+> app and how to reach upstream. This fork (see [README.md](README.md)) has no support; a problem in upstream's code
+> belongs upstream.
+
 # Security
 
 ## Reporting a vulnerability

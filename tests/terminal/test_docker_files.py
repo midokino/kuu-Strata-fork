@@ -274,6 +274,7 @@ class Publishing(unittest.TestCase):
         self.assertEqual(doc.count("docker build -t strata:src"), doc.count("--build-arg STRATA_COMMIT=$(git rev-parse HEAD)"))
         self.assertIn("/data/install/", (ROOT / ".dockerignore").read_text(encoding="utf-8"))
 
+    @unittest.skip("fork: upstream's .github folder (workflows, issue templates) was removed")
     def test_workflow_is_manual_and_pushes_only_on_request(self):
         data = yaml.safe_load(self.WORKFLOW.read_text(encoding="utf-8"))
         triggers = data.get("on", data.get(True))            # YAML 1.1 reads a bare `on` as True
