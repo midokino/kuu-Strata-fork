@@ -25,7 +25,7 @@ Ryzen 7 9700X (105 W in BIOS) · RTX 5070 12 GB · DDR5-5600 64 GB (dual channel
 Windows 11 · model: ISTA-DASLab DeepSeek-V4.1-Flash-1017 GSQ-RCO **IQ2_XS (2.25 bpw)**, 5 of 6 experts, DSpark drafter
 on, 128K context.
 
-| | upstream as installed (Strata 0.2.7, 10/29) | starting point (11/12: drafter on, 5 experts, nothing skipped) | kuu precise (this fork, default) | kuu fast |
+| | upstream as installed (Strata 0.2.7, 10/29) | starting point (11/12: drafter on, 5 experts, nothing skipped) | kuu precise | kuu fast (this fork, default) |
 |---|---|---|---|---|
 | short replies (4 kinds, averaged) | about 6.7 tok/s | 12.0 tok/s | 22–23 tok/s | 28.3 tok/s |
 | mixed long generations ("wide": prose, code, tool calls, translation, thinking) | — | about 10 tok/s | 20.6–21.6 tok/s | 27.8 tok/s |
@@ -45,7 +45,7 @@ against that run fast is +26–32 % on generation, +20–22 % on the 4.6K prompt
 ![GPQA Diamond: this fork against ISTA-DASLab's numbers](docs/img/kuu-strata-gpqa.png)
 
 **GPQA Diamond** (198 questions, the simple-evals / LightEval prompt, reasoning effort 50, temperature 1.0, 32,768
-tokens for thinking and answer, no separate thinking budget, the adopted settings below, one run): **89.4 %** (177/198;
+tokens for thinking and answer, no separate thinking budget, kuu precise (settings at the end), one run): **89.4 %** (177/198;
 95 % interval 84.3–93.0 %; physics 94.2 %, chemistry 87.1 %, biology 78.9 %; 20 questions had their thinking closed near
 the token limit, 10 of them still right). For reference, ISTA-DASLab's card gives 90.40 for this quant and 90.91 for the
 original model (their run count and sampling settings are not published); one question's difference is well inside a
@@ -56,16 +56,16 @@ scored 83.8 %; re-asking only that run's 32 misses without the budget turned 17 
 bound, since re-asking only the misses also recovers the ones lost by chance).
 
 A much more aggressive setting scored the same: `STRATA_DS4_DISK_SKIP_W=0.26` with deferral (`STRATA_DS4_DEFER=3`,
-`STRATA_DS4_DEFER_W=0.20`), KL 0.183 against the reference (three times the adopted setting's), got **89.9 %** (178/198)
+`STRATA_DS4_DEFER_W=0.20`), KL 0.183 against the reference (three times kuu precise's), got **89.9 %** (178/198)
 under the same conditions, thinking at 26.7 tok/s instead of 21.8. Question by question, 169 were right in both runs, 8
-only in the adopted one, 9 only in this one: no difference beyond sampling noise. So multiple-choice reasoning survives
+only in kuu precise, 9 only in this one: no difference beyond sampling noise. So multiple-choice reasoning survives
 far more skipping than KL suggests. Code came out the same way on HumanEval+ (temperature 0, no thinking): 95.7 / 89.6 %
-for the adopted setting and 94.5 / 90.2 % for this one (base / plus tests), one or two problems apart either way, although
+for kuu precise and 94.5 / 90.2 % for this one (base / plus tests), one or two problems apart either way, although
 only 25 of the 164 solutions were word for word the same. Exact copying and Japanese prose were not measured this way.
 
 ## What changed (all in `src/dsv41`, environment variables, off unless set)
 
-Adopted on the reference PC (the settings it runs with are at the end):
+Adopted on the reference PC (kuu precise; kuu fast adds more skipping and deferral, both at the end):
 
 | setting | what it does | measured |
 |---|---|---|
@@ -93,8 +93,8 @@ Measured and **not** adopted (kept, off by default, so the numbers can be reprod
 
 A faster setting that measured well: `STRATA_DS4_DISK_SKIP_W=0.24` gives +18 % on "wide" and about 28–31 tok/s on
 code at temperature 0, at KL 0.114 (English suffers most). Going further, `DISK_SKIP_W=0.26` with deferral 0.20 reaches
-about 35 tok/s on code at KL 0.183 and still scored 89.9 % on GPQA Diamond (above). Neither is the default: KL says they
-change the text more; GPQA and HumanEval+ came out the same, exact copying and Japanese prose are unchecked.
+about 35 tok/s on code at KL 0.183 and still scored 89.9 % on GPQA Diamond (above). The second is kuu fast, the default since 11/20: KL says it
+changes the text more, but GPQA and HumanEval+ came out the same; exact copying and Japanese prose are unchecked.
 
 ## Getting DSpark drafts on a 12 GB card
 
@@ -154,14 +154,17 @@ Then build a pack with it (`pack_gguf.py --drafter`) and copy the six `dspark_*`
 
 Two presets, both in the model config's `args` / `env` (the numbers in the card at the top are these two).
 
-### kuu precise (the default)
+### kuu fast (the default)
 
 ```json
 "args": ["--max-context", "131072", "--eos", "1", "--vision", "off", "--dspark", "on", "--dspark-conf", "0.65", "--reserve-mib", "200"],
 "env": {
   "DS4_MTP_VRAM_GB": "0.5",
-  "STRATA_DS4_DISK_SKIP_W": "0.20",
+  "STRATA_DS4_DISK_SKIP_W": "0.26",
   "STRATA_DS4_RAM_SKIP_W": "0.10",
+  "STRATA_DS4_DEFER": "3",
+  "STRATA_DS4_DEFER_W": "0.20",
+  "STRATA_DS4_PROMPT_SKIP": "2",
   "STRATA_DS4_DROP_SHARDS": "1",
   "STRATA_DS4_DSPARK_LAZY": "1",
   "STRATA_DS4_LM_AHEAD": "1",
@@ -170,26 +173,25 @@ Two presets, both in the model config's `args` / `env` (the numbers in the card 
 }
 ```
 
+More skipping of light experts that are not in RAM, deferral of the light experts that remain, and the shorter prompt
+skip. KL against the reference is 0.183 (kuu precise: 0.057), but kuu fast matched kuu precise on GPQA Diamond
+(89.9 / 89.4 %) and HumanEval+ (base 94.5 / 95.7 %, plus 90.2 / 89.6 %), at about +30 % on generation and +7 % on
+30K-token prompt reads. Exact copying and Japanese prose have not been checked, and KL says the wording changes more
+there.
+
 `--reserve-mib 200` and the 105 W BIOS setting depend on the machine: below 150 MiB the reference PC's VRAM spilled into
 shared memory, which Windows does silently (slower, no error).
 
-### kuu fast
+### kuu precise (closest to the unskipped model)
 
-kuu precise with three changes: more skipping of light experts that are not in RAM, deferral of the light experts
-that remain, and the shorter prompt skip. About +30 % on generation and +7 % on 30K-token prompt reads; KL against
-the reference triples (0.057 → 0.183), but GPQA Diamond scored the same (89.9 % against 89.4 %). In `env`, change one
-value and add three:
+kuu fast with less skipping and no deferral. In `env`, change one value and drop three:
 
 ```json
-  "STRATA_DS4_DISK_SKIP_W": "0.26",
-  "STRATA_DS4_DEFER": "3",
-  "STRATA_DS4_DEFER_W": "0.20",
-  "STRATA_DS4_PROMPT_SKIP": "2"
+  "STRATA_DS4_DISK_SKIP_W": "0.20",
 ```
 
-kuu fast matched kuu precise on GPQA Diamond (89.9 / 89.4 %) and HumanEval+ (base 94.5 / 95.7 %, plus 90.2 / 89.6 %);
-exact copying and Japanese prose have not been checked, and KL says the wording changes more there. `STRATA_DS4_DISK_SKIP_W=0.24` alone is a milder step (+18 % on mixed
-long jobs, KL 0.114).
+and remove `STRATA_DS4_DEFER`, `STRATA_DS4_DEFER_W` and `STRATA_DS4_PROMPT_SKIP`. `STRATA_DS4_DISK_SKIP_W=0.24` alone is
+a step in between (+18 % on mixed long jobs, KL 0.114).
 
 ## Credits
 
