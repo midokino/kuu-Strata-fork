@@ -34,6 +34,7 @@ on, 128K context.
 | prompt read, 30K tokens | — | 414 / 431 tok/s | 490–544 tok/s | 471 tok/s |
 | quality: KL against the same model with 6 experts and nothing skipped (3 segments, 3,000 positions) | — | 0.036 | 0.057 (±0.005 between runs) | 0.183 |
 | GPQA Diamond (one run each, see below) | — (ISTA-DASLab's card: 90.40 %) | — | 89.4 % | 89.9 % |
+| HumanEval / HumanEval+ (EvalPlus 0.3.1, temperature 0, no thinking) | — | — | 95.7 / 89.6 % | 94.5 / 90.2 % |
 
 The 10/29 column was measured while the engine inherited a low disk priority from the program that started it (upstream fixed
 that later, #4733), so its prompt reads are lower than they should be; upstream's own DeepSeek doc gives about 4.7 tok/s
@@ -58,8 +59,9 @@ A much more aggressive setting scored the same: `STRATA_DS4_DISK_SKIP_W=0.26` wi
 `STRATA_DS4_DEFER_W=0.20`), KL 0.183 against the reference (three times the adopted setting's), got **89.9 %** (178/198)
 under the same conditions, thinking at 26.7 tok/s instead of 21.8. Question by question, 169 were right in both runs, 8
 only in the adopted one, 9 only in this one: no difference beyond sampling noise. So multiple-choice reasoning survives
-far more skipping than KL suggests; exact copying, code and Japanese prose were not measured this way and may be more
-sensitive.
+far more skipping than KL suggests. Code came out the same way on HumanEval+ (temperature 0, no thinking): 95.7 / 89.6 %
+for the adopted setting and 94.5 / 90.2 % for this one (base / plus tests), one or two problems apart either way, although
+only 25 of the 164 solutions were word for word the same. Exact copying and Japanese prose were not measured this way.
 
 ## What changed (all in `src/dsv41`, environment variables, off unless set)
 
@@ -92,7 +94,7 @@ Measured and **not** adopted (kept, off by default, so the numbers can be reprod
 A faster setting that measured well: `STRATA_DS4_DISK_SKIP_W=0.24` gives +18 % on "wide" and about 28–31 tok/s on
 code at temperature 0, at KL 0.114 (English suffers most). Going further, `DISK_SKIP_W=0.26` with deferral 0.20 reaches
 about 35 tok/s on code at KL 0.183 and still scored 89.9 % on GPQA Diamond (above). Neither is the default: KL says they
-change the text more, and only multiple-choice reasoning has been checked.
+change the text more; GPQA and HumanEval+ came out the same, exact copying and Japanese prose are unchecked.
 
 ## Getting DSpark drafts on a 12 GB card
 
@@ -185,8 +187,8 @@ value and add three:
   "STRATA_DS4_PROMPT_SKIP": "2"
 ```
 
-Only multiple-choice reasoning has been checked for kuu fast; exact copying, code correctness and Japanese prose have
-not, and KL says the text changes more there. `STRATA_DS4_DISK_SKIP_W=0.24` alone is a milder step (+18 % on mixed
+kuu fast matched kuu precise on GPQA Diamond (89.9 / 89.4 %) and HumanEval+ (base 94.5 / 95.7 %, plus 90.2 / 89.6 %);
+exact copying and Japanese prose have not been checked, and KL says the wording changes more there. `STRATA_DS4_DISK_SKIP_W=0.24` alone is a milder step (+18 % on mixed
 long jobs, KL 0.114).
 
 ## Credits
