@@ -25,18 +25,21 @@ Ryzen 7 9700X (105 W in BIOS) · RTX 5070 12 GB · DDR5-5600 64 GB (dual channel
 Windows 11 · model: ISTA-DASLab DeepSeek-V4.1-Flash-1017 GSQ-RCO **IQ2_XS (2.25 bpw)**, 5 of 6 experts, DSpark drafter
 on, 128K context.
 
-| | upstream as installed (Strata 0.2.7, 10/29) | starting point (11/12: drafter on, 5 experts, nothing skipped) | this fork |
-|---|---|---|---|
-| short replies (4 kinds, averaged) | about 6.7 tok/s | 12.0 tok/s | 22–23 tok/s |
-| mixed long generations ("wide": prose, code, tool calls, translation, thinking) | — | about 10 tok/s | 20.6–21.6 tok/s |
-| code, temperature 0 | 4.6–4.9 tok/s | — | 24–27 tok/s |
-| prompt read, 4.6K tokens | 56–68 tok/s | 128 / 137 tok/s | 152 / 164 tok/s |
-| prompt read, 30K tokens | — | 414 / 431 tok/s | 490–544 tok/s |
-| quality: KL against the same model with 6 experts and nothing skipped (3 segments, 3,000 positions) | — | 0.036 | 0.057 (±0.005 between runs) |
+| | upstream as installed (Strata 0.2.7, 10/29) | starting point (11/12: drafter on, 5 experts, nothing skipped) | kuu precise (this fork, default) | kuu fast |
+|---|---|---|---|---|
+| short replies (4 kinds, averaged) | about 6.7 tok/s | 12.0 tok/s | 22–23 tok/s | 28.3 tok/s |
+| mixed long generations ("wide": prose, code, tool calls, translation, thinking) | — | about 10 tok/s | 20.6–21.6 tok/s | 27.8 tok/s |
+| code, temperature 0 | 4.6–4.9 tok/s | — | 24–27 tok/s | 29–33 tok/s |
+| prompt read, 4.6K tokens | 56–68 tok/s | 128 / 137 tok/s | 152 / 164 tok/s | 183 / 199 tok/s |
+| prompt read, 30K tokens | — | 414 / 431 tok/s | 490–544 tok/s | 471 tok/s |
+| quality: KL against the same model with 6 experts and nothing skipped (3 segments, 3,000 positions) | — | 0.036 | 0.057 (±0.005 between runs) | 0.183 |
+| GPQA Diamond (one run each, see below) | — (ISTA-DASLab's card: 90.40 %) | — | 89.4 % | 89.9 % |
 
 The 10/29 column was measured while the engine inherited a low disk priority from the program that started it (upstream fixed
 that later, #4733), so its prompt reads are lower than they should be; upstream's own DeepSeek doc gives about 4.7 tok/s
-for an RTX 5070 with 64 GB of RAM, which matches its code speed. Generation speed moves 3–8 % from run to run; every comparison above was made against a baseline run in the same session.
+for an RTX 5070 with 64 GB of RAM, which matches its code speed. Generation speed moves 3–8 % from run to run; every comparison above was made against a baseline run in the same session. The kuu fast column (settings at the end) was
+measured on 11/20 in one session with kuu precise, which gave 22.4 (short), 21.1 (wide), 24.2 (code), 152 / 163 and 442 there;
+against that run fast is +26–32 % on generation, +20–22 % on the 4.6K prompt and +7 % on the 30K one.
 
 ![GPQA Diamond: this fork against ISTA-DASLab's numbers](docs/img/kuu-strata-gpqa.png)
 
