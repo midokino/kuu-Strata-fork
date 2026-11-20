@@ -2,6 +2,8 @@
 
 **DeepSeek-V4.1-Flash on one 12 GB GPU — an unofficial Strata fork**
 
+![kuu-Strata: kuu fast, kuu precise and ISTA's 2.25 bpw quant as is - code, mixed long jobs, 30K prompt read, GPQA Diamond](docs/img/kuu-strata-card.png)
+
 kuu-Strata is an unofficial fork of [Strata](https://github.com/Niko1221/Strata) **v0.2.12** that keeps the DeepSeek-V4.1-Flash engine
 (`src/dsv41`, `strata-dsv41.exe`) and tunes it for **one 12 GB GPU and 64 GB of RAM**. Upstream removed DeepSeek in
 0.2.14; this branch does not follow upstream after 0.2.12.
@@ -145,6 +147,10 @@ Then build a pack with it (`pack_gguf.py --drafter`) and copy the six `dspark_*`
 
 ## Settings on the reference PC
 
+Two presets, both in the model config's `args` / `env` (the numbers in the card at the top are these two).
+
+### kuu precise (the default)
+
 ```json
 "args": ["--max-context", "131072", "--eos", "1", "--vision", "off", "--dspark", "on", "--dspark-conf", "0.65", "--reserve-mib", "200"],
 "env": {
@@ -161,6 +167,24 @@ Then build a pack with it (`pack_gguf.py --drafter`) and copy the six `dspark_*`
 
 `--reserve-mib 200` and the 105 W BIOS setting depend on the machine: below 150 MiB the reference PC's VRAM spilled into
 shared memory, which Windows does silently (slower, no error).
+
+### kuu fast
+
+kuu precise with three changes: more skipping of light experts that are not in RAM, deferral of the light experts
+that remain, and the shorter prompt skip. About +30 % on generation and +7 % on 30K-token prompt reads; KL against
+the reference triples (0.057 → 0.183), but GPQA Diamond scored the same (89.9 % against 89.4 %). In `env`, change one
+value and add three:
+
+```json
+  "STRATA_DS4_DISK_SKIP_W": "0.26",
+  "STRATA_DS4_DEFER": "3",
+  "STRATA_DS4_DEFER_W": "0.20",
+  "STRATA_DS4_PROMPT_SKIP": "2"
+```
+
+Only multiple-choice reasoning has been checked for kuu fast; exact copying, code correctness and Japanese prose have
+not, and KL says the text changes more there. `STRATA_DS4_DISK_SKIP_W=0.24` alone is a milder step (+18 % on mixed
+long jobs, KL 0.114).
 
 ## Credits
 

@@ -1,0 +1,41 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>kuu-Strata</title>
+<style>
+:root{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--line:#e6e5e0;--tile:#f3f2ee;--up:#8a8984;--pre:#2a78d6;--fast:#eb6834}
+html,body{margin:0;background:var(--surface)}
+body{width:1200px;height:675px;font-family:"Segoe UI",system-ui,sans-serif;color:var(--ink);box-sizing:border-box;padding:30px 48px 20px}
+.top{display:flex;align-items:baseline;gap:18px}
+h1{font-size:46px;margin:0;font-weight:750;letter-spacing:-.5px}
+.sub{font-size:26px;color:var(--ink2)}.sub b{color:var(--ink);font-weight:700}
+.top{margin-bottom:30px}
+.hw{display:flex;gap:8px;margin:16px 0 22px;flex-wrap:wrap}
+.hw span{background:var(--tile);border-radius:6px;padding:5px 11px;font-size:15px;color:var(--ink2)}
+.hw b{color:var(--ink);font-weight:650}
+table{width:100%;border-collapse:collapse;table-layout:fixed}
+th{font-size:17px;text-align:right;padding:0 14px 8px;font-weight:700;vertical-align:bottom}
+th small{display:block;font-size:13px;font-weight:400;color:var(--ink2)}
+th i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:7px;vertical-align:0}
+th:first-child{text-align:left;padding-left:0}
+td{border-top:1px solid var(--line);padding:20px 14px;text-align:right;font-size:36px;font-weight:650;font-variant-numeric:tabular-nums}
+td:first-child{text-align:left;font-size:19px;font-weight:600;padding-left:0}
+td:first-child small{display:block;font-size:14px;font-weight:400;color:var(--ink2)}
+td.up{color:var(--ink2);font-weight:500}
+td.na{color:#b4b3ad;font-size:16px;font-weight:400}
+td small.n{display:block;font-size:14px;font-weight:400;color:var(--ink2);margin-top:-2px}
+td em{font-style:normal;font-size:14px;font-weight:500;color:var(--ink2);margin-left:4px}
+.foot{font-size:12.5px;color:var(--ink2);line-height:1.4;margin-top:14px}
+</style></head><body>
+<div class="top"><h1>kuu-Strata</h1><span class="sub">DeepSeek-V4.1-Flash on <b>12 GB VRAM + 64 GB RAM</b></span></div>
+<table>
+<colgroup><col style="width:34%"><col style="width:22%"><col style="width:22%"><col style="width:22%"></colgroup>
+<tr><th>tok/s unless noted</th>
+ <th><i style="background:var(--fast)"></i>kuu fast<small>more skipping + deferral</small></th>
+ <th><i style="background:var(--pre)"></i>kuu precise<small>this fork, default</small></th>
+ <th><i style="background:var(--up)"></i>ISTA 2.25 as is<small>upstream Strata 0.2.7, nothing tuned</small></th></tr>
+<tr><td>Code<small>temperature 0, 1,500 tokens, average of 3</small></td><td>30.4</td><td>24.2</td><td class="up">4.8</td></tr>
+<tr><td>Mixed long jobs<small>prose, code, tool calls, translation, thinking</small></td><td>27.8</td><td>21.1</td><td class="na">not measured</td></tr>
+<tr><td>Prompt read<small>30K-token prompt</small></td><td>471</td><td>442</td><td class="na">not measured</td></tr>
+<tr><td>GPQA Diamond<small>198 questions, one run</small></td><td>89.9 %</td><td>89.4 %</td><td class="up">90.40 %<small class="n">ISTA's card</small></td></tr>
+</table>
+<div class="foot">RTX 5070 · Ryzen 7 9700X · DDR5-5600 (dual channel) · one PCIe 4.0 NVMe · Windows 11; model ISTA-DASLab IQ2_XS, 2.25 bpw, 266 GB. kuu precise and kuu fast measured in one session on 11/20 (KL against the same quant with 6 experts and nothing skipped: 0.057 / 0.183); ISTA 2.25 as is: upstream Strata 0.2.7 on 10/29, code 4.6–4.9 (upstream's own doc gives about 4.7 tok/s for an RTX 5070 + 64 GB). GPQA: reasoning effort 50, temperature 1.0, 32,768 tokens; the last column is ISTA-DASLab's published score for the same weights. Speeds move 3–8 % between runs. <span style="white-space:nowrap">github.com/midokino/kuu-Strata-fork</span></div>
+</body></html>
