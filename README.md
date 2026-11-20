@@ -49,6 +49,13 @@ Two other runs, for context: with the server's thinking budget left at 4,000 tok
 scored 83.8 %; re-asking only that run's 32 misses without the budget turned 17 into right answers (92.4 %, an upper
 bound, since re-asking only the misses also recovers the ones lost by chance).
 
+A much more aggressive setting scored the same: `STRATA_DS4_DISK_SKIP_W=0.26` with deferral (`STRATA_DS4_DEFER=3`,
+`STRATA_DS4_DEFER_W=0.20`), KL 0.183 against the reference (three times the adopted setting's), got **89.9 %** (178/198)
+under the same conditions, thinking at 26.7 tok/s instead of 21.8. Question by question, 169 were right in both runs, 8
+only in the adopted one, 9 only in this one: no difference beyond sampling noise. So multiple-choice reasoning survives
+far more skipping than KL suggests; exact copying, code and Japanese prose were not measured this way and may be more
+sensitive.
+
 ## What changed (all in `src/dsv41`, environment variables, off unless set)
 
 Adopted on the reference PC (the settings it runs with are at the end):
@@ -77,8 +84,10 @@ Measured and **not** adopted (kept, off by default, so the numbers can be reprod
 | `STRATA_DS4_DRAFT_RAM_W` / `_DRAFT_DISK_W` | higher skip thresholds on draft rows only | big quality loss |
 | others in `4d3b2d3a` | routing / budget variants F1, F2, E2, A2, A3 | none beat the plain rule |
 
-A faster, lower-quality setting that measured well: `STRATA_DS4_DISK_SKIP_W=0.24` gives +18 % on "wide" and about
-28–31 tok/s on code at temperature 0, at KL 0.114 (English suffers most). It is not the default.
+A faster setting that measured well: `STRATA_DS4_DISK_SKIP_W=0.24` gives +18 % on "wide" and about 28–31 tok/s on
+code at temperature 0, at KL 0.114 (English suffers most). Going further, `DISK_SKIP_W=0.26` with deferral 0.20 reaches
+about 35 tok/s on code at KL 0.183 and still scored 89.9 % on GPQA Diamond (above). Neither is the default: KL says they
+change the text more, and only multiple-choice reasoning has been checked.
 
 ## Getting DSpark drafts on a 12 GB card
 

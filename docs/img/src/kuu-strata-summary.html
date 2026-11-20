@@ -1,0 +1,75 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>kuu-Strata summary</title>
+<style>
+:root{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--grid:#e6e5e0;--fork:#2a78d6;--ref:#8a8984;--tile:#f3f2ee}
+html,body{margin:0;background:var(--surface)}
+body{width:1200px;height:675px;font-family:"Segoe UI",system-ui,sans-serif;color:var(--ink);box-sizing:border-box;padding:36px 52px 26px;display:flex;flex-direction:column}
+h1{font-size:32px;margin:0 0 4px;font-weight:650}
+.sub{font-size:17.5px;color:var(--ink2);margin:0 0 20px}
+h2{font-size:17px;margin:0 0 8px;font-weight:650}
+.mem{margin-bottom:22px}
+.bar{display:flex;height:34px;gap:2px}
+.bar div{border-radius:4px;display:flex;align-items:center;padding-left:10px;font-size:14.5px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden}
+.memlab{display:flex;justify-content:space-between;font-size:14.5px;color:var(--ink2);margin-top:6px}
+.row{display:flex;gap:34px;flex:1}
+.panel{flex:1}
+.tiles{width:250px;display:flex;flex-direction:column;gap:10px}
+.tile{background:var(--tile);border-radius:8px;padding:10px 14px}
+.tile b{display:block;font-size:27px;font-weight:700;line-height:1.15}
+.tile span{font-size:14px;color:var(--ink2)}
+.key{display:flex;gap:18px;font-size:14.5px;color:var(--ink2);margin-bottom:6px}
+.key i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.foot{font-size:13px;color:var(--ink2);line-height:1.4;margin-top:8px}
+svg text{font-family:"Segoe UI",system-ui,sans-serif}
+</style></head><body>
+<h1>DeepSeek-V4.1-Flash on a mid-range gaming PC</h1>
+<p class="sub">RTX 5070 12 GB · 64 GB DDR5 · one PCIe 4.0 NVMe · Windows 11 — kuu-Strata, an unofficial fork of Strata 0.2.12</p>
+
+<div class="mem">
+ <h2>Where the 266 GB model lives (ISTA-DASLab IQ2_XS, 2.25 bpw, drawn to scale)</h2>
+ <div class="bar">
+  <div style="flex:12;background:#1c5cab" title="GPU 12 GB">GPU</div>
+  <div style="flex:36;background:#2a78d6">RAM cache 36 GB</div>
+  <div style="flex:218;background:#d9d8d2;color:#0b0b0b">the rest is read from the NVMe SSD as tokens need it</div>
+ </div>
+ <div class="memlab"><span>▲ GPU: 12 GB of VRAM, all in use (200 MiB kept free)</span><span>GPU + RAM cache hold under a fifth of the model</span></div>
+</div>
+
+<div class="row">
+ <div class="panel"><h2>Generation, tok/s</h2>
+  <div class="key"><span><i style="background:#8a8984"></i>upstream as installed (0.2.7)</span><span><i style="background:#2a78d6"></i>this fork</span></div>
+  <svg id="g" width="440" height="250"></svg></div>
+ <div class="panel"><h2>Prompt read, tok/s</h2>
+  <div class="key"><span>&nbsp;</span></div>
+  <svg id="p" width="360" height="250"></svg></div>
+ <div class="tiles">
+  <div class="tile"><b>89.4 %</b><span>GPQA Diamond, one run (ISTA's card: 90.40 for this quant, 90.91 original)</span></div>
+  <div class="tile"><b>~21 tok/s</b><span>mixed long jobs: prose, code, tool calls, translation, thinking</span></div>
+  <div class="tile"><b>0.057</b><span>KL against the same quant with 6 experts and nothing skipped</span></div>
+ </div>
+</div>
+<div class="foot">Same PC throughout. Upstream column: Strata 0.2.7 as installed on 10/29 (upstream's own doc gives about 4.7 tok/s for an RTX 5070 with 64 GB). DSpark drafter on, 5 of 6 experts, 128K context. Software changes only; numbers move 3–8 % between runs.</div>
+<script>
+const NS="http://www.w3.org/2000/svg";
+function chart(id,max,ticks,groups){
+ const svg=document.getElementById(id),W=+svg.getAttribute("width"),H=+svg.getAttribute("height"),L=0,R=86,T=4,B=26;
+ const X=v=>L+v/max*(W-L-R);
+ const el=(t,a,txt)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;svg.appendChild(e);return e;};
+ for(const t of ticks){el("line",{x1:X(t),x2:X(t),y1:T,y2:H-B,stroke:"#e6e5e0"});el("text",{x:X(t),y:H-6,"text-anchor":t?"middle":"start","font-size":13,fill:"#52514e"},t);}
+ const gh=(H-T-B)/groups.length;
+ groups.forEach((g,i)=>{const y0=T+gh*i;
+  el("text",{x:0,y:y0+18,"font-size":15,"font-weight":600,fill:"#0b0b0b"},g.l);
+  g.b.forEach((b,j)=>{const y=y0+28+j*26,v=b.v;
+   if(v==null){el("text",{x:2,y:y+15,"font-size":13.5,fill:"#52514e"},"not measured");return;}
+   el("rect",{x:X(0),y,width:Math.max(4,X(v)-X(0)),height:20,rx:4,fill:j?"#2a78d6":"#8a8984"});
+   el("text",{x:X(v)+8,y:y+15,"font-size":15,"font-weight":j?700:500,fill:"#0b0b0b"},b.t);});});
+}
+chart("g",30,[0,10,20,30],[
+ {l:"Code, temperature 0",b:[{v:4.75,t:"4.6–4.9"},{v:25.5,t:"24–27"}]},
+ {l:"Short replies (4 kinds)",b:[{v:6.7,t:"6.7"},{v:22.5,t:"22–23"}]},
+]);
+chart("p",600,[0,200,400,600],[
+ {l:"4.6K-token prompt",b:[{v:62,t:"56–68"},{v:158,t:"152–164"}]},
+ {l:"30K-token prompt",b:[{v:null},{v:517,t:"490–544"}]},
+]);
+</script></body></html>

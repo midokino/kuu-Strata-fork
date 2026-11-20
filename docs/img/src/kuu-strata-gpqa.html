@@ -1,0 +1,47 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>GPQA Diamond</title>
+<style>
+:root{--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#8a8984;--grid:#e6e5e0;--fork:#2a78d6;--ref:#8a8984}
+html,body{margin:0;background:var(--surface)}
+body{width:1200px;height:675px;font-family:"Segoe UI",system-ui,sans-serif;color:var(--ink);box-sizing:border-box;padding:30px 56px 22px}
+h1{font-size:34px;margin:0 0 6px;font-weight:650;letter-spacing:-.2px}
+.sub{font-size:19px;color:var(--ink2);margin:0 0 18px}
+svg text{font-family:"Segoe UI",system-ui,sans-serif}
+.foot{font-size:14.5px;color:var(--ink2);line-height:1.45;margin-top:4px}
+</style></head><body>
+<h1>GPQA Diamond: DeepSeek-V4.1-Flash</h1>
+<p class="sub">The 2.25-bit build on one 12 GB GPU + 64 GB RAM, against ISTA-DASLab's published numbers</p>
+<svg id="c" width="1088" height="452"></svg>
+<div class="foot">Gray: ISTA-DASLab model card, reasoning effort 50 (run count and sampling not published). Blue / orange: this fork, kuu-Strata (5 of 6 experts; adopted skip settings / DISK_SKIP 0.26 + deferral 0.20), KL against the same quant with 6 experts and nothing skipped;
+each one run of 198 questions, reasoning effort 50, temperature 1.0, 32,768 tokens; bars: 95 % intervals (Wilson). Accuracy, % — the axis starts at 80.</div>
+<script>
+const rows=[
+ {l:"Original model",s:"FP8 / FP4",v:90.91,c:"ref"},
+ {l:"IQ2_XXS",s:"2.00 bpw",v:90.91,c:"ref"},
+ {l:"IQ2_XS",s:"2.25 bpw",v:90.40,c:"ref"},
+ {l:"IQ1_M",s:"1.75 bpw",v:88.38,c:"ref"},
+ {l:"IQ2_XS on 12 GB GPU",s:"this fork, adopted · KL 0.057",v:89.39,lo:84.34,hi:93.03,c:"fork",t:"89.4 %"},
+ {l:"…fast setting",s:"more skipping + deferral · KL 0.183",v:89.90,lo:84.87,hi:93.39,c:"fast",t:"89.9 %"},
+];
+const svg=document.getElementById("c"),NS="http://www.w3.org/2000/svg";
+const W=1088,H=452,L=300,R=110,T=10,B=40,x0=80,x1=95;
+const X=v=>L+(v-x0)/(x1-x0)*(W-L-R);
+const el=(t,a,txt)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;svg.appendChild(e);return e;};
+for(const t of [80,85,90,95]){el("line",{x1:X(t),x2:X(t),y1:T,y2:H-B,stroke:"#e6e5e0","stroke-width":1});
+ el("text",{x:X(t),y:H-B+26,"text-anchor":"middle","font-size":16,fill:"#52514e"},t+"%");}
+const rh=(H-T-B)/rows.length;
+rows.forEach((r,i)=>{
+ const mine=r.c!=="ref",y=T+rh*i+rh/2+(mine?8:0);
+ if(r.c==="fork") el("line",{x1:20,x2:W-10,y1:y-rh/2-2,y2:y-rh/2-2,stroke:"#d6d5cf","stroke-width":1,"stroke-dasharray":"4 4"});
+ el("text",{x:0,y:y-3,"font-size":20,"font-weight":mine?700:600,fill:"#0b0b0b"},r.l);
+ el("text",{x:0,y:y+20,"font-size":15.5,fill:"#52514e"},r.s);
+ const col=r.c==="fork"?"#2a78d6":r.c==="fast"?"#eb6834":"#8a8984";
+ el("line",{x1:L-10,x2:X(r.v),y1:y,y2:y,stroke:"#ecebe6","stroke-width":2});
+ if(r.lo){el("line",{x1:X(r.lo),x2:X(r.hi),y1:y,y2:y,stroke:col,"stroke-width":3,"stroke-linecap":"round"});
+  for(const v of [r.lo,r.hi]) el("line",{x1:X(v),x2:X(v),y1:y-9,y2:y+9,stroke:col,"stroke-width":3,"stroke-linecap":"round"});
+  el("text",{x:X(r.lo),y:y+30,"text-anchor":"middle","font-size":14,fill:"#52514e"},r.lo.toFixed(1));
+  el("text",{x:X(r.hi),y:y+30,"text-anchor":"middle","font-size":14,fill:"#52514e"},r.hi.toFixed(1));}
+ el("circle",{cx:X(r.v),cy:y,r:mine?11:9,fill:col,stroke:"#fcfcfb","stroke-width":2});
+ el("text",{x:(r.lo?X(r.hi):X(r.v))+20,y:y+7,"font-size":22,"font-weight":mine?700:600,fill:"#0b0b0b"},(r.t||r.v.toFixed(2)));
+});
+</script></body></html>
