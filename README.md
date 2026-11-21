@@ -2,7 +2,7 @@
 
 **DeepSeek-V4.1-Flash on one 12 GB GPU — an unofficial Strata fork**
 
-![kuu-Strata: kuu fast, kuu precise and ISTA's 2.25 bpw quant as is - code, mixed long jobs, 30K prompt read, GPQA Diamond](docs/img/kuu-strata-card.png)
+![kuu-Strata: kuu fast against ISTA's 2.25 bpw quant as is - code, mixed long jobs, 30K prompt read, GPQA Diamond](docs/img/kuu-strata-card.png)
 
 kuu-Strata is an unofficial fork of [Strata](https://github.com/Niko1221/Strata) **v0.2.12** that keeps the DeepSeek-V4.1-Flash engine
 (`src/dsv41`, `strata-dsv41.exe`) and tunes it for **one 12 GB GPU and 64 GB of RAM**. Upstream removed DeepSeek in
