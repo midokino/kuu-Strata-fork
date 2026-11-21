@@ -85,6 +85,9 @@ struct Image {
 struct Stats {
     int64_t tokens = 0;
     int64_t experts = 0, cpu_experts = 0;   // routed experts run, and how many of them on the CPU lane
+    // (local) the CPU lane's entries in decode / verify windows (T <= kWin) by how many tokens shared the expert: [0] one ..
+    // [7] eight or more; win_hist the windows by T (1 .. 8).  Printed per request under STRATA_DS4_NT_HIST=1.
+    int64_t nt_hist[8] = {}, win_hist[8] = {};
     int64_t stream_experts = 0;             // ... and how many of the others streamed to the GPU (the PCIe lane)
     double cpu_ms = 0.0, gpu_wait_ms = 0.0;   // the CPU lane's time; the host's waits for the routing
     double layer_ms = 0.0, head_ms = 0.0, engram_ms = 0.0;   // the layers' host time in all; the head's wait; Engram reads

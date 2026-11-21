@@ -1488,6 +1488,26 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                      s.experts ? 100.0 * (double) s.cpu_experts / (double) s.experts : 0.0);
         if (d_off > 0) std::fprintf(stderr, "maya ds4 serve: drafts %lld of %lld kept; %s\n", d_acc, d_off,
                                     per_position(s_dec, s).c_str());
+        static const bool nt_hist_on = [] { const char* v = std::getenv("STRATA_DS4_NT_HIST"); return v != nullptr && std::atoi(v) != 0; }();
+        if (nt_hist_on) {   // (local) the CPU lane's entries by tokens sharing the expert, and the windows by T, over this decode
+            long long ne = 0, nw = 0, sn = 0, st = 0;
+            for (int i = 0; i < 8; ++i) {
+                ne += s.nt_hist[i] - s_dec.nt_hist[i]; sn += (long long) (i + 1) * (s.nt_hist[i] - s_dec.nt_hist[i]);
+                nw += s.win_hist[i] - s_dec.win_hist[i]; st += (long long) (i + 1) * (s.win_hist[i] - s_dec.win_hist[i]);
+            }
+            std::string a = "maya ds4 serve: nt_hist entries " + std::to_string(ne) + " by tokens:", b = " | windows " + std::to_string(nw) + " by T:";
+            char c[48];
+            for (int i = 0; i < 8; ++i) {
+                std::snprintf(c, sizeof c, " %d:%.1f%%", i + 1, ne ? 100.0 * (double) (s.nt_hist[i] - s_dec.nt_hist[i]) / (double) ne : 0.0); a += c;
+                std::snprintf(c, sizeof c, " %d:%.1f%%", i + 1, nw ? 100.0 * (double) (s.win_hist[i] - s_dec.win_hist[i]) / (double) nw : 0.0); b += c;
+            }
+            std::snprintf(c, sizeof c, " (mean %.2f)", ne ? (double) sn / (double) ne : 0.0); a += c;
+            std::snprintf(c, sizeof c, " (mean %.2f)", nw ? (double) st / (double) nw : 0.0); b += c;
+            long long tot = 0;
+            for (int i = 0; i < 8; ++i) tot += s.nt_hist[i] + s.win_hist[i];
+            std::fprintf(stderr, "%s%s [cpu delta %lld, nt+win total %lld]\n", a.c_str(), b.c_str(),
+                         (long long) (s.cpu_experts - s_dec.cpu_experts), tot);
+        }
         if (nan_stop) {   // (its state holds the NaNs: the next request starts from nothing)
             m.reset();
             held.clear();

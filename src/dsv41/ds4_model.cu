@@ -10204,6 +10204,11 @@ struct Model::Impl {
                     lt.n_cpu = (int) ents.size();
                     st.cpu_ms += now_ms() - tc;
                     st.cpu_experts += nslots;
+                    if (T >= 1 && T <= kWin) {   // (local: STRATA_DS4_NT_HIST's counts, decode / verify windows only)
+                        ++st.win_hist[std::min(T, 8) - 1];
+                        for (const Ent& en : ents)
+                            if (en.n >= 1) ++st.nt_hist[std::min(en.n, 8) - 1];
+                    }
                     n_deferred += (int64_t) lg.size();
                 } else if (!ents.empty() && lane_skip) { for (int t = 0; t < T; ++t) rp.cpu[t] = 0; }
                 else if (!ents.empty()) {
@@ -10251,6 +10256,11 @@ struct Model::Impl {
                     }
                     st.cpu_ms += now_ms() - tc;
                     st.cpu_experts += nslots;
+                    if (T >= 1 && T <= kWin) {   // (local: STRATA_DS4_NT_HIST's counts, decode / verify windows only)
+                        ++st.win_hist[std::min(T, 8) - 1];
+                        for (const Ent& en : ents)
+                            if (en.n >= 1) ++st.nt_hist[std::min(en.n, 8) - 1];
+                    }
                 }
                 if (lc >= 0) lane_answer(ln_cls[(size_t) lc], lt);
             }
@@ -15322,6 +15332,11 @@ struct Model::Impl {
         }
         st.experts += (int64_t) T * l.k_exp;
         st.cpu_experts += nslots;
+        if (T >= 1 && T <= kWin) {   // (local: STRATA_DS4_NT_HIST's counts, decode / verify windows only)
+            ++st.win_hist[std::min(T, 8) - 1];
+            for (const Ent& en : ents)
+                if (en.n >= 1) ++st.nt_hist[std::min(en.n, 8) - 1];
+        }
 #if defined(STRATA_METAL)
         if (T == 1) lookahead_prefetch(l, d.ev2, la_n, ents);
 #endif
