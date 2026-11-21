@@ -40,7 +40,8 @@ The 10/29 column was measured while the engine inherited a low disk priority fro
 that later, #4733), so its prompt reads are lower than they should be; upstream's own DeepSeek doc gives about 4.7 tok/s
 for an RTX 5070 with 64 GB of RAM, which matches its code speed. Generation speed moves 3–8 % from run to run; every comparison above was made against a baseline run in the same session. The kuu fast column (settings at the end) was
 measured on 11/20 in one session with kuu precise, which gave 22.4 (short), 21.1 (wide), 24.2 (code), 152 / 163 and 442 there;
-against that run fast is +26–32 % on generation, +20–22 % on the 4.6K prompt and +7 % on the 30K one.
+against that run fast is +26–32 % on generation, +20–22 % on the 4.6K prompt and +7 % on the 30K one. The card at the top shows a later run of kuu fast alone (11/21, right after a reboot with other apps closed):
+28.0 (wide), 32.5 (code, average of 3), 195 / 199 and 519 tok/s.
 
 ![GPQA Diamond: this fork against ISTA-DASLab's numbers](docs/img/kuu-strata-gpqa.png)
 

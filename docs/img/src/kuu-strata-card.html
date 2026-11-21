@@ -32,11 +32,11 @@ td em{font-style:normal;font-size:14px;font-weight:500;color:var(--ink2);margin-
  <th><i style="background:var(--fast)"></i>kuu fast<small>this fork, default</small></th>
  <th><i style="background:var(--pre)"></i>kuu precise<small>less skipping, no deferral</small></th>
  <th><i style="background:var(--up)"></i>ISTA 2.25 as is<small>upstream Strata 0.2.7, nothing tuned</small></th></tr>
-<tr><td>Code<small>temperature 0, 1,500 tokens, average of 3</small></td><td>30.4</td><td>24.2</td><td class="up">4.8</td></tr>
-<tr><td>Mixed long jobs<small>prose, code, tool calls, translation, thinking</small></td><td>27.8</td><td>21.1</td><td class="na">not measured</td></tr>
-<tr><td>Prompt read<small>30K-token prompt</small></td><td>471</td><td>442</td><td class="na">not measured</td></tr>
+<tr><td>Code<small>temperature 0, 1,500 tokens, average of 3</small></td><td>32.5</td><td>24.2</td><td class="up">4.8</td></tr>
+<tr><td>Mixed long jobs<small>prose, code, tool calls, translation, thinking</small></td><td>28.0</td><td>21.1</td><td class="na">not measured</td></tr>
+<tr><td>Prompt read<small>30K-token prompt</small></td><td>519</td><td>442</td><td class="na">not measured</td></tr>
 <tr><td>HumanEval+<small>EvalPlus, temperature 0, no thinking</small></td><td>90.2 %</td><td>89.6 %</td><td class="na">not measured</td></tr>
 <tr><td>GPQA Diamond<small>198 questions, one run</small></td><td>89.9 %</td><td>89.4 %</td><td class="up">90.40 %<small class="n">ISTA's card</small></td></tr>
 </table>
-<div class="foot">RTX 5070 · Ryzen 7 9700X · DDR5-5600 (dual channel) · one PCIe 4.0 NVMe · Windows 11; model ISTA-DASLab IQ2_XS, 2.25 bpw, 266 GB. kuu precise and kuu fast measured in one session on 11/20 (KL against the same quant with 6 experts and nothing skipped: 0.057 / 0.183); ISTA 2.25 as is: upstream Strata 0.2.7 on 10/29, code 4.6–4.9 (upstream's own doc gives about 4.7 tok/s for an RTX 5070 + 64 GB). HumanEval base tests: 94.5 / 95.7 %. GPQA: reasoning effort 50, temperature 1.0, 32,768 tokens; the last column is ISTA-DASLab's published score for the same weights. Speeds move 3–8 % between runs. <span style="white-space:nowrap">github.com/midokino/kuu-Strata-fork</span></div>
+<div class="foot">RTX 5070 · Ryzen 7 9700X · DDR5-5600 (dual channel) · one PCIe 4.0 NVMe · Windows 11; model ISTA-DASLab IQ2_XS, 2.25 bpw, 266 GB. kuu fast measured on 11/21 right after a reboot with other apps closed, kuu precise on 11/20 (KL against the same quant with 6 experts and nothing skipped: 0.057 / 0.183); ISTA 2.25 as is: upstream Strata 0.2.7 on 10/29, code 4.6–4.9 (upstream's own doc gives about 4.7 tok/s for an RTX 5070 + 64 GB). HumanEval base tests: 94.5 / 95.7 %. GPQA: reasoning effort 50, temperature 1.0, 32,768 tokens; the last column is ISTA-DASLab's published score for the same weights. Speeds move 3–8 % between runs. <span style="white-space:nowrap">github.com/midokino/kuu-Strata-fork</span></div>
 </body></html>
