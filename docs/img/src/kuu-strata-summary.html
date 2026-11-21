@@ -37,18 +37,18 @@ svg text{font-family:"Segoe UI",system-ui,sans-serif}
 
 <div class="row">
  <div class="panel"><h2>Generation, tok/s</h2>
-  <div class="key"><span><i style="background:#8a8984"></i>upstream as installed (0.2.7)</span><span><i style="background:#2a78d6"></i>this fork</span></div>
+  <div class="key"><span><i style="background:#8a8984"></i>upstream as installed (0.2.7)</span><span><i style="background:#eb6834"></i>this fork (kuu fast)</span></div>
   <svg id="g" width="440" height="250"></svg></div>
  <div class="panel"><h2>Prompt read, tok/s</h2>
   <div class="key"><span>&nbsp;</span></div>
   <svg id="p" width="360" height="250"></svg></div>
  <div class="tiles">
-  <div class="tile"><b>89.4 %</b><span>GPQA Diamond, one run (ISTA's card: 90.40 for this quant, 90.91 original)</span></div>
-  <div class="tile"><b>~21 tok/s</b><span>mixed long jobs: prose, code, tool calls, translation, thinking</span></div>
-  <div class="tile"><b>0.057</b><span>KL against the same quant with 6 experts and nothing skipped</span></div>
+  <div class="tile"><b>89.9 %</b><span>GPQA Diamond, one run (ISTA's card: 90.40 for this quant, 90.91 original)</span></div>
+  <div class="tile"><b>28.0 tok/s</b><span>mixed long jobs: prose, code, tool calls, translation, thinking</span></div>
+  <div class="tile"><b>0.183</b><span>KL against the same quant with 6 experts and nothing skipped (kuu precise: 0.057)</span></div>
  </div>
 </div>
-<div class="foot">Same PC throughout. Upstream column: Strata 0.2.7 as installed on 10/29 (upstream's own doc gives about 4.7 tok/s for an RTX 5070 with 64 GB). DSpark drafter on, 5 of 6 experts, 128K context. Software changes only; numbers move 3–8 % between runs.</div>
+<div class="foot">Same PC throughout. This fork: the kuu fast preset, measured on 11/21. Upstream: Strata 0.2.7 as installed on 10/29 (upstream's own doc gives about 4.7 tok/s for an RTX 5070 with 64 GB). DSpark drafter on, 5 of 6 experts, 128K context. Software changes only; numbers move 3–8 % between runs.</div>
 <script>
 const NS="http://www.w3.org/2000/svg";
 function chart(id,max,ticks,groups){
@@ -61,15 +61,15 @@ function chart(id,max,ticks,groups){
   el("text",{x:0,y:y0+18,"font-size":15,"font-weight":600,fill:"#0b0b0b"},g.l);
   g.b.forEach((b,j)=>{const y=y0+28+j*26,v=b.v;
    if(v==null){el("text",{x:2,y:y+15,"font-size":13.5,fill:"#52514e"},"not measured");return;}
-   el("rect",{x:X(0),y,width:Math.max(4,X(v)-X(0)),height:20,rx:4,fill:j?"#2a78d6":"#8a8984"});
+   el("rect",{x:X(0),y,width:Math.max(4,X(v)-X(0)),height:20,rx:4,fill:j?"#eb6834":"#8a8984"});
    el("text",{x:X(v)+8,y:y+15,"font-size":15,"font-weight":j?700:500,fill:"#0b0b0b"},b.t);});});
 }
-chart("g",30,[0,10,20,30],[
- {l:"Code, temperature 0",b:[{v:4.75,t:"4.6–4.9"},{v:25.5,t:"24–27"}]},
- {l:"Short replies (4 kinds)",b:[{v:6.7,t:"6.7"},{v:22.5,t:"22–23"}]},
+chart("g",40,[0,10,20,30,40],[
+ {l:"Code, temperature 0",b:[{v:4.75,t:"4.6–4.9"},{v:32.5,t:"32.5"}]},
+ {l:"Short replies (4 kinds)",b:[{v:6.7,t:"6.7"},{v:29.2,t:"29.2"}]},
 ]);
 chart("p",600,[0,200,400,600],[
- {l:"4.6K-token prompt",b:[{v:62,t:"56–68"},{v:158,t:"152–164"}]},
- {l:"30K-token prompt",b:[{v:null},{v:517,t:"490–544"}]},
+ {l:"4.6K-token prompt",b:[{v:62,t:"56–68"},{v:197,t:"195–199"}]},
+ {l:"30K-token prompt",b:[{v:null},{v:519,t:"519"}]},
 ]);
 </script></body></html>

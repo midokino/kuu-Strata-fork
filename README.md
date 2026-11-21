@@ -27,20 +27,21 @@ on, 128K context.
 
 | | upstream as installed (Strata 0.2.7, 10/29) | starting point (11/12: drafter on, 5 experts, nothing skipped) | kuu precise | kuu fast (this fork, default) |
 |---|---|---|---|---|
-| short replies (4 kinds, averaged) | about 6.7 tok/s | 12.0 tok/s | 22–23 tok/s | 28.3 tok/s |
-| mixed long generations ("wide": prose, code, tool calls, translation, thinking) | — | about 10 tok/s | 20.6–21.6 tok/s | 27.8 tok/s |
-| code, temperature 0 | 4.6–4.9 tok/s | — | 24–27 tok/s | 29–33 tok/s |
-| prompt read, 4.6K tokens | 56–68 tok/s | 128 / 137 tok/s | 152 / 164 tok/s | 183 / 199 tok/s |
-| prompt read, 30K tokens | — | 414 / 431 tok/s | 490–544 tok/s | 471 tok/s |
+| short replies (4 kinds, averaged) | about 6.7 tok/s | 12.0 tok/s | 22.4 tok/s | 28.3 tok/s |
+| mixed long generations ("wide": prose, code, tool calls, translation, thinking) | — | about 10 tok/s | 21.1 tok/s | 27.8 tok/s |
+| code, temperature 0 | 4.6–4.9 tok/s | — | 24.2 tok/s | 30.4 tok/s |
+| prompt read, 4.6K tokens | 56–68 tok/s | 128 / 137 tok/s | 152 / 163 tok/s | 183 / 199 tok/s |
+| prompt read, 30K tokens | — | 414 / 431 tok/s | 442 tok/s | 471 tok/s |
 | quality: KL against the same model with 6 experts and nothing skipped (3 segments, 3,000 positions) | — | 0.036 | 0.057 (±0.005 between runs) | 0.183 |
 | GPQA Diamond (one run each, see below) | — (ISTA-DASLab's card: 90.40 %) | — | 89.4 % | 89.9 % |
 | HumanEval / HumanEval+ (EvalPlus 0.3.1, temperature 0, no thinking) | — | — | 95.7 / 89.6 % | 94.5 / 90.2 % |
 
 The 10/29 column was measured while the engine inherited a low disk priority from the program that started it (upstream fixed
 that later, #4733), so its prompt reads are lower than they should be; upstream's own DeepSeek doc gives about 4.7 tok/s
-for an RTX 5070 with 64 GB of RAM, which matches its code speed. Generation speed moves 3–8 % from run to run; every comparison above was made against a baseline run in the same session. The kuu fast column (settings at the end) was
-measured on 11/20 in one session with kuu precise, which gave 22.4 (short), 21.1 (wide), 24.2 (code), 152 / 163 and 442 there;
-against that run fast is +26–32 % on generation, +20–22 % on the 4.6K prompt and +7 % on the 30K one. The card at the top shows a later run of kuu fast alone (11/21, right after a reboot with other apps closed):
+for an RTX 5070 with 64 GB of RAM, which matches its code speed. Generation speed moves 3–8 % from run to run; every comparison above was made against a baseline run in the same session. The kuu precise and kuu fast columns (settings at
+the end) were measured on 11/20 in one session (code: average of 3): fast is +26–32 % on generation, +20–22 % on the 4.6K
+prompt and +7 % on the 30K one. kuu precise alone measured higher on other days (wide 20.6–21.6, code 24–27, 30K read
+490–544), which is the run-to-run spread. The card at the top shows a later run of kuu fast alone (11/21, right after a reboot with other apps closed):
 28.0 (wide), 32.5 (code, average of 3), 195 / 199 and 519 tok/s.
 
 ![GPQA Diamond: this fork against ISTA-DASLab's numbers](docs/img/kuu-strata-gpqa.png)
@@ -94,7 +95,7 @@ Measured and **not** adopted (kept, off by default, so the numbers can be reprod
 
 A faster setting that measured well: `STRATA_DS4_DISK_SKIP_W=0.24` gives +18 % on "wide" and about 28–31 tok/s on
 code at temperature 0, at KL 0.114 (English suffers most). Going further, `DISK_SKIP_W=0.26` with deferral 0.20 reaches
-about 35 tok/s on code at KL 0.183 and still scored 89.9 % on GPQA Diamond (above). The second is kuu fast, the default since 11/20: KL says it
+about 30–35 tok/s on code at KL 0.183 and still scored 89.9 % on GPQA Diamond (above). The second is kuu fast, the default since 11/20: KL says it
 changes the text more, but GPQA and HumanEval+ came out the same; exact copying and Japanese prose are unchecked.
 
 ## Getting DSpark drafts on a 12 GB card
@@ -153,7 +154,7 @@ Then build a pack with it (`pack_gguf.py --drafter`) and copy the six `dspark_*`
 
 ## Settings on the reference PC
 
-Two presets, both in the model config's `args` / `env` (the numbers in the card at the top are these two).
+Two presets, both in the model config's `args` / `env` (the card at the top is kuu fast).
 
 ### kuu fast (the default)
 
