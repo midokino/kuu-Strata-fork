@@ -5,7 +5,7 @@
 ![kuu-Strata: kuu fast against ISTA's 2.25 bpw quant as is - code, mixed long jobs, 30K prompt read, GPQA Diamond](docs/img/kuu-strata-card.png)
 
 kuu-Strata is an unofficial fork of [Strata](https://github.com/Niko1221/Strata) **v0.2.12** that keeps the DeepSeek-V4.1-Flash engine
-(`src/dsv41`, `strata-dsv41.exe`) and tunes it for **one 12 GB GPU and 64 GB of RAM**. Upstream removed DeepSeek in
+(`src/dsv41`, `strata-dsv41.exe`, upstream's port of Project Maya's `maya-ds4`) and tunes it for **one 12 GB GPU and 64 GB of RAM**. Upstream removed DeepSeek in
 0.2.14; this branch does not follow upstream after 0.2.12.
 
 It is a hobby project: one PC, measured carefully, no support. It is not affiliated with Strata, Project Maya,
@@ -198,8 +198,9 @@ a step in between (+18 % on mixed long jobs, KL 0.114).
 ## Credits
 
 - [Strata](https://github.com/Niko1221/Strata) by Niko1221 and the Strata contributors (MIT) — the engine this is built on.
-- [Project Maya](https://github.com/mw00/project-maya) by Peasant Smith and the Project Maya contributors (MIT) — the lazy
-  drafter head, the BF16 router and several ideas measured here; see `NOTICE`.
+- [Project Maya](https://github.com/mw00/project-maya) by Peasant Smith and the Project Maya contributors (MIT) — the DeepSeek
+  engine itself (`src/dsv41` is upstream Strata's port of Maya's `maya-ds4`; notice in `third_party/project-maya`), and
+  later the lazy drafter head, the BF16 router and several ideas measured here; see `NOTICE`.
 - [Xolotl](https://github.com/Indras-Mirror/Xolotl) — the Engram prefetch idea; [Strata-xeno](https://github.com/xenodeve/Strata-xeno)
   — an earlier Expert Deferral attempt (#254).
 - DeepSeek-V4.1-Flash by DeepSeek (MIT); the GSQ-RCO quants by ISTA-DASLab; the DSpark drafter GGUF by Unsloth.

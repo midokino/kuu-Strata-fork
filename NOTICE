@@ -1,7 +1,8 @@
 This branch is an unofficial fork of Strata (https://github.com/Niko1221/Strata), MIT License,
 Copyright (c) 2026 Niko1221 and the Strata contributors - see LICENSE.
 
-Parts of the DeepSeek engine changes (the lazy DSpark drafter head STRATA_DS4_DSPARK_LAZY, and the BF16 router
+The DeepSeek engine (src/dsv41) is upstream Strata's port of Project Maya's maya-ds4; upstream's notice for it is kept
+in third_party/project-maya. Parts of the DeepSeek engine changes (the lazy DSpark drafter head STRATA_DS4_DSPARK_LAZY, and the BF16 router
 STRATA_DS4_ROUTER_BF16 after MAYA_DS4_ROUTER_BF16) follow
 Project Maya (https://github.com/mw00/project-maya), used under its license:
 
