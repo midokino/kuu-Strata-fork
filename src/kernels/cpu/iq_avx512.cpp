@@ -51,6 +51,16 @@ const int prefetch_ahead = [] {
     const char* v = std::getenv("STRATA_IQ_PREFETCH");
     return v ? std::atoi(v) : 2048;
 }();
+// (local) STRATA_IQ_PREFETCH_NTA=1: the same prefetches with the NTA hint (weights are read once a token: keep them from
+// pushing activations, grids and routing data out of L2/L3, as streamed game assets are read); default T0 as before
+const bool prefetch_nta = [] {
+    const char* v = std::getenv("STRATA_IQ_PREFETCH_NTA");
+    return v != nullptr && std::atoi(v) != 0;
+}();
+inline void pfetch(const char* p) {
+    if (prefetch_nta) _mm_prefetch(p, _MM_HINT_NTA);
+    else _mm_prefetch(p, _MM_HINT_T0);
+}
 
 // lanes 0-7 -> s0, 8-15 -> s1, 16-23 -> s2, 24-31 -> s3 (int16 lanes of a maddubs result: two values each)
 inline __m512i scales4(int s0, int s1, int s2, int s3) {
@@ -219,8 +229,8 @@ inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y,
         // blocks ahead (the next row's start included) before the decode needs them
         if (prefetch_ahead > 0) {
             const uint8_t* ahead = blk + (size_t) prefetch_ahead;
-            _mm_prefetch((const char*) ahead, _MM_HINT_T0);
-            _mm_prefetch((const char*) ahead + 64, _MM_HINT_T0);
+            pfetch((const char*) ahead);
+            pfetch((const char*) ahead + 64);
         }
         __m512i acci[NT];
         for (int t = 0; t < NT; ++t) acci[t] = _mm512_setzero_si512();
@@ -398,8 +408,8 @@ inline void row_dot_x(const uint8_t* row, int nblocks, const block_q8_K* const* 
         const uint8_t* blk = row + (size_t) i * FmtX<TY>::bytes;
         if (prefetch_ahead > 0) {
             const uint8_t* ahead = blk + (size_t) prefetch_ahead;
-            _mm_prefetch((const char*) ahead, _MM_HINT_T0);
-            _mm_prefetch((const char*) ahead + 64, _MM_HINT_T0);
+            pfetch((const char*) ahead);
+            pfetch((const char*) ahead + 64);
         }
         __m512i acci[NT];
         for (int t = 0; t < NT; ++t) acci[t] = _mm512_setzero_si512();
@@ -461,8 +471,8 @@ void dot_rows_wide(const uint8_t* w, size_t row_bytes, int n, const void* const*
                 for (int q = 0; q < rr; ++q) {
                     const uint8_t* blk = w + (size_t) (rg + q) * row_bytes + (size_t) i * FmtX<TY>::bytes;
                     if (prefetch_ahead > 0) {
-                        _mm_prefetch((const char*) blk + prefetch_ahead, _MM_HINT_T0);
-                        _mm_prefetch((const char*) blk + prefetch_ahead + 64, _MM_HINT_T0);
+                        pfetch((const char*) blk + prefetch_ahead);
+                        pfetch((const char*) blk + prefetch_ahead + 64);
                     }
                     __m512i w8[4], sc[4];
                     __m512i corr = zero;
@@ -541,8 +551,8 @@ void rows_m(const uint8_t* w, size_t rb, int n, const block_q8_K* const* y, cons
             const uint8_t* qh = blk + 32;
             const uint8_t* scb = blk + 48;
             if (prefetch_ahead > 0) {
-                _mm_prefetch((const char*) blk + prefetch_ahead, _MM_HINT_T0);
-                _mm_prefetch((const char*) blk + prefetch_ahead + 64, _MM_HINT_T0);
+                pfetch((const char*) blk + prefetch_ahead);
+                pfetch((const char*) blk + prefetch_ahead + 64);
             }
             const uint16_t sc0 = u16(scb), sc1 = u16(scb + 2), sc2 = u16(scb + 4), sc3 = u16(scb + 6);
             const uint16_t d16 = (uint16_t) ((sc0 >> 12) | ((sc1 >> 8) & 0x00f0) | ((sc2 >> 4) & 0x0f00) | (sc3 & 0xf000));
@@ -707,10 +717,10 @@ void gu_fused(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const vo
             const uint8_t* gb = gr + (size_t) i * FmtX<TY>::bytes;
             const uint8_t* ub = ur + (size_t) i * FmtX<TY>::bytes;
             if (prefetch_ahead > 0) {
-                _mm_prefetch((const char*) gb + prefetch_ahead, _MM_HINT_T0);
-                _mm_prefetch((const char*) gb + prefetch_ahead + 64, _MM_HINT_T0);
-                _mm_prefetch((const char*) ub + prefetch_ahead, _MM_HINT_T0);
-                _mm_prefetch((const char*) ub + prefetch_ahead + 64, _MM_HINT_T0);
+                pfetch((const char*) gb + prefetch_ahead);
+                pfetch((const char*) gb + prefetch_ahead + 64);
+                pfetch((const char*) ub + prefetch_ahead);
+                pfetch((const char*) ub + prefetch_ahead + 64);
             }
             __m512i ig[NT], iu[NT];
             for (int t = 0; t < NT; ++t) ig[t] = iu[t] = zero;
@@ -804,7 +814,7 @@ void qd_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const*
         int ib = 0;
         for (; ib + 1 < nb; ib += 2) {
             const uint8_t* b0 = row + (size_t) ib * kBlk;
-            if (pf > 0) { _mm_prefetch((const char*) b0 + pf, _MM_HINT_T0); _mm_prefetch((const char*) b0 + pf + 64, _MM_HINT_T0); }
+            if (pf > 0) { pfetch((const char*) b0 + pf); pfetch((const char*) b0 + pf + 64); }
             const __m512i wq = _mm512_inserti64x4(_mm512_castsi256_si512(q50_weights((const block_q5_0*) b0)), q50_weights((const block_q5_0*) (b0 + kBlk)), 1);
             const float d0 = h2f(((const block_q5_0*) b0)->d);
             const float d1 = h2f(((const block_q5_0*) (b0 + kBlk))->d);

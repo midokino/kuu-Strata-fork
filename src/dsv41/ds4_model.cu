@@ -3800,6 +3800,24 @@ struct Model::Impl {
                     for (size_t k = 1; k < c.cpus.size(); ++k) cores.back().push_back(c.cpus[k]);
             }
         }
+        // (local) STRATA_DS4_CORE0_LAST=1: node 0's first core moved to the end of its list, so the service thread (and
+        // tune_lane's timing thread) sit on the second core and the first core is the pool's last - with --cpu-threads one
+        // under the core count, left to the OS.  Windows delivers the storage / BitLocker DPCs and most interrupts to CPU 0
+        // (11/22: 22% DPC + 14% interrupt time on CPU 0 during decode, under 0.5% on every other CPU), the same reason
+        // game engines keep their main thread off core 0.
+        {
+            static const bool core0_last = [] {
+                const char* v = std::getenv("STRATA_DS4_CORE0_LAST");
+                return v != nullptr && std::atoi(v) != 0;
+            }();
+            if (core0_last && !core_threads.empty() && core_threads[0].size() > 1) {
+                std::rotate(core_threads[0].begin(), core_threads[0].begin() + 1, core_threads[0].end());
+                const size_t per = smt_cores ? core_threads[0].back().cpus.size() : 1;
+                if (!cores.empty() && cores[0].size() > per)
+                    std::rotate(cores[0].begin(), cores[0].begin() + (std::ptrdiff_t) per, cores[0].end());
+                std::fprintf(stderr, "ds4: (local) core 0 last: service thread on CPU %d\n", cores[0][0]);
+            }
+        }
         NH = file_experts ? 1 : (int) std::min<size_t>(2, cores.size());
         if (NH > 1 && ((g.ff / NH) % 128 != 0 || (g.dim / NH) % 128 != 0)) NH = 1;
         if (!pk.gguf) make_pools();   // (a GGUF's after its experts: copy_experts decides NH)
