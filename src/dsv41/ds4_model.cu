@@ -14253,9 +14253,136 @@ struct Model::Impl {
         const int D = g.dim;
         cudaSetDevice(d.id);
         hc_mean(d.h, T, g.hc, D, d.tap, D, d.st);
-        CK(cudaStreamWaitEvent(d.st, ev_seed, 0));
+        // (recording a graph: ev_seed was recorded on this same stream before the capture began, so the graph's launch on
+        //  d.st is already after it, and a wait on uncaptured work is refused inside a capture)
+        if (!capturing) CK(cudaStreamWaitEvent(d.st, ev_seed, 0));
         CK(cudaMemcpy2DAsync(h_taps + j * D, nt * D * 4, d.tap, (size_t) D * 4, (size_t) D * 4, (size_t) T,
                              cudaMemcpyDeviceToHost, d.st));
+        return true;
+    }
+
+    // (local) STRATA_DS4_GRAPH=1: a window's layers (forward_serial / forward_par) recorded by stream capture into a CUDA
+    // graph and replayed with one launch, instead of ~1,600 kernel launches a verify step (11/23 nsys: GPU idle 4.9% of the
+    // decode, 6 in 10 of it 2-5 us gaps between launches).  Recorded again every window (the drafts' count, the positions
+    // and the experts' jobs change) and swapped into the window size's executable graph by cudaGraphExecUpdate; a new
+    // instantiation only when the topology changed.  One GPU only.  Any capture error turns it off for the run (that
+    // window fails; the next ones take the plain path).  Off by default.
+    std::map<int, cudaGraphExec_t> gexec_by_T;
+    bool graph_broken = false;
+    bool capturing = false;   // (forward_graph's capture is open)
+    long g_steps = 0, g_upd = 0, g_new = 0;
+    double g_cap_ms = 0, g_inst_ms = 0;
+    // STRATA_DS4_GRAPH=2: one graph a layer instead (recorded and launched layer by layer, so the host records layer
+    // l+1 while the device runs layer l, instead of the device waiting for the whole window's record + update)
+    static int graph_mode() {
+        static const int m = [] {
+            const char* v = std::getenv("STRATA_DS4_GRAPH");
+            return v != nullptr ? std::atoi(v) : 0;
+        }();
+        return m;
+    }
+    std::map<int, cudaGraphExec_t> gexec_by_layer;   // (layer * 64 + window size)
+    bool layer_graph = false;                        // (forward_serial records each layer: STRATA_DS4_GRAPH=2)
+    // a closed capture into `ex` (updated in place when its topology is the same, else instantiated anew), launched on s
+    bool graph_put(cudaGraph_t gph, cudaGraphExec_t& ex, cudaStream_t s, std::string& err) {
+        const double t1 = now_ms();
+        if (ex != nullptr) {
+            cudaGraphExecUpdateResultInfo info{};
+            if (cudaGraphExecUpdate(ex, gph, &info) == cudaSuccess) ++g_upd;
+            else {
+                (void) cudaGetLastError();
+                cudaGraphExecDestroy(ex);
+                ex = nullptr;
+            }
+        }
+        if (ex == nullptr) {
+            const cudaError_t e = cudaGraphInstantiate(&ex, gph, 0);
+            if (e != cudaSuccess) {
+                cudaGraphDestroy(gph);
+                ex = nullptr;
+                err = std::string("graph instantiate: ") + cudaGetErrorString(e);
+                graph_broken = true;
+                return false;
+            }
+            ++g_new;
+        }
+        cudaGraphDestroy(gph);
+        g_inst_ms += now_ms() - t1;
+        CK(cudaGraphLaunch(ex, s));
+        return true;
+    }
+    // one layer (its drafter tap and the layer) recorded and launched (STRATA_DS4_GRAPH=2)
+    bool layer_graphed(Layer& l, int64_t p0, int T, std::string& err) {
+        Dev& d = devs[(size_t) l.dev];
+        cudaSetDevice(d.id);
+        const double t0 = now_ms();
+        cudaError_t e = cudaStreamBeginCapture(d.st, cudaStreamCaptureModeRelaxed);
+        if (e != cudaSuccess) {
+            graph_broken = true;
+            err = std::string("graph capture start: ") + cudaGetErrorString(e);
+            return false;
+        }
+        capturing = true;
+        const bool ok = tap(d, l.il, T, err) && layer(l, 0, p0, T, wplan, err);
+        capturing = false;
+        cudaGraph_t gph = nullptr;
+        e = cudaStreamEndCapture(d.st, &gph);
+        if (!ok || e != cudaSuccess || gph == nullptr) {
+            graph_broken = true;
+            if (gph != nullptr) cudaGraphDestroy(gph);
+            (void) cudaGetLastError();
+            std::fprintf(stderr, "ds4: (local) graph: layer %d capture failed (%s; %s)\n", l.il, ok ? "-" : err.c_str(),
+                         cudaGetErrorString(e));
+            if (ok) err = std::string("graph capture: ") + cudaGetErrorString(e);
+            return false;
+        }
+        g_cap_ms += now_ms() - t0;
+        return graph_put(gph, gexec_by_layer[l.il * 64 + T], d.st, err);
+    }
+    bool graph_on() const {
+        const bool on = graph_mode() != 0;
+        // (only the decode windows' mailbox path, wplan.async: the prompt windows' layers read the routing back to the host
+        //  each layer - cudaEventSynchronize mid-window - and cannot be recorded)
+        return on && !graph_broken && devs.size() == 1 && !prof_window && dump_h == nullptr && wplan.async;
+    }
+    bool forward_graph(int64_t p0, int T, std::string& err) {
+        if (graph_mode() == 2 && !par) {   // (layer by layer, inside forward_serial)
+            layer_graph = true;
+            const bool ok = forward_serial(p0, T, err);
+            layer_graph = false;
+            if (ok && (++g_steps == 20 || g_steps % 500 == 0))
+                std::fprintf(stderr, "ds4: (local) graph (layers): %ld windows, %ld updated, %ld instantiated, capture %.3f ms + update %.3f ms a window\n",
+                             g_steps, g_upd, g_new, g_cap_ms / g_steps, g_inst_ms / g_steps);
+            return ok;
+        }
+        Dev& d0 = devs[0];
+        cudaSetDevice(d0.id);
+        const double t0 = now_ms();
+        cudaError_t e = cudaStreamBeginCapture(d0.st, cudaStreamCaptureModeRelaxed);
+        if (e != cudaSuccess) {
+            graph_broken = true;
+            std::fprintf(stderr, "ds4: (local) graph: capture did not start (%s): plain launches from now on\n", cudaGetErrorString(e));
+            return par ? forward_par(p0, T, err) : forward_serial(p0, T, err);
+        }
+        capturing = true;
+        const bool ok = par ? forward_par(p0, T, err) : forward_serial(p0, T, err);
+        capturing = false;
+        cudaGraph_t gph = nullptr;
+        e = cudaStreamEndCapture(d0.st, &gph);
+        if (!ok || e != cudaSuccess || gph == nullptr) {
+            graph_broken = true;
+            if (gph != nullptr) cudaGraphDestroy(gph);
+            (void) cudaGetLastError();
+            std::fprintf(stderr, "ds4: (local) graph: capture failed at window %ld (%s; %s): plain launches from now on\n",
+                         g_steps, ok ? "-" : err.c_str(), cudaGetErrorString(e));
+            if (ok) err = std::string("graph capture: ") + cudaGetErrorString(e);
+            return false;
+        }
+        g_cap_ms += now_ms() - t0;
+        if (!graph_put(gph, gexec_by_T[T], d0.st, err)) return false;
+        if (++g_steps == 20 || g_steps % 500 == 0)
+            std::fprintf(stderr, "ds4: (local) graph: %ld windows, %ld updated, %ld instantiated, capture %.3f ms + update %.3f ms a window\n",
+                         g_steps, g_upd, g_new, g_cap_ms / g_steps, g_inst_ms / g_steps);
         return true;
     }
 
@@ -14304,7 +14431,9 @@ struct Model::Impl {
         prof_window = prof_on && T == 1;
         n_logits = std::min(logits_rows, T);
         const double tl = now_ms();
-        if (par) {
+        if (graph_on()) {
+            if (!forward_graph(p0, T, err)) return false;
+        } else if (par) {
             if (!forward_par(p0, T, err)) return false;
         } else if (!forward_serial(p0, T, err)) return false;
         st.layer_ms += now_ms() - tl;
@@ -14384,9 +14513,13 @@ struct Model::Impl {
                 CK(cudaMemcpyAsync(b.cand, bb + nh + np + nk, nc, cudaMemcpyHostToDevice, b.st));
                 cur = l.dev;
             }
-            if (!tap(devs[(size_t) l.dev], il, T, err)) return false;
-            if (il == 0 && ds4_dbg("DS4_DBG_EMB")) dbg_h("after tap", devs[(size_t) l.dev], T);
-            if (!layer(l, 0, p0, T, wplan, err)) return false;
+            if (layer_graph) {
+                if (!layer_graphed(l, p0, T, err)) return false;
+            } else {
+                if (!tap(devs[(size_t) l.dev], il, T, err)) return false;
+                if (il == 0 && ds4_dbg("DS4_DBG_EMB")) dbg_h("after tap", devs[(size_t) l.dev], T);
+                if (!layer(l, 0, p0, T, wplan, err)) return false;
+            }
             if (dump_h != nullptr) {   // DS4_DUMP_H: every layer's residual stream, for tools/ds4/compare.py --layers
                 Dev& dd = devs[(size_t) l.dev];
                 std::vector<float> hv((size_t) T * H * D);
