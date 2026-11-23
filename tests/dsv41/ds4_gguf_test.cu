@@ -1896,6 +1896,80 @@ void test_engram_q6k(cudaStream_t s) {
     cudaFree(d_rows), cudaFree(d_out);
 }
 
+// (local) --bench-iqmv: the dense matrices' Q5_K GEMV (attention, shared experts) by column count, mv_kernel against
+// STRATA_DS4_MV_R's multi-row form (R 1, 2, 4), on random blocks: time, GB/s of weights, and whether the outputs are mv_kernel's bits
+void bench_iqmv(cudaStream_t s) {
+    namespace iq = gg::iq;
+    cudaEvent_t a, e;
+    cudaEventCreate(&a);
+    cudaEventCreate(&e);
+    struct Sh { const char* name; int k, n, nj; };
+    const Sh shapes[] = {{"wq_b 32768x1280", 1280, 32768, 1}, {"wo_b 5120x8192", 8192, 5120, 1}, {"wo_a 8 x 1024x4096", 4096, 1024, 8},
+                         {"shared w1+w3 2 x 2304x5120", 5120, 2304, 2}};
+    std::mt19937 rng(7);
+    for (const Sh& sh : shapes) {
+        const size_t rb = iq::row_bytes(iq::kQ5_K, sh.k), wb = rb * (size_t) sh.n;
+        std::vector<uint8_t> hw(wb * sh.nj);
+        for (auto& v : hw) v = (uint8_t) rng();
+        for (size_t r = 0; r < hw.size(); r += 176) { hw[r] = 0x00; hw[r + 1] = 0x20; hw[r + 2] = 0x00; hw[r + 3] = 0x1c; }   // (sane f16 d / dmin per block)
+        uint8_t* dw = nullptr;
+        CU(cudaMalloc(&dw, hw.size()));
+        CU(cudaMemcpy(dw, hw.data(), hw.size(), cudaMemcpyHostToDevice));
+        std::vector<int8_t> hq((size_t) 16 * sh.k);
+        for (auto& v : hq) v = (int8_t) (rng() % 255 - 127);
+        std::vector<float> hd((size_t) 16 * sh.k / 32);
+        for (auto& v : hd) v = 0.001f * (float) (1 + rng() % 100);
+        int8_t* dq = nullptr;
+        float *dd = nullptr, *dy = nullptr;
+        CU(cudaMalloc(&dq, hq.size()));
+        CU(cudaMemcpy(dq, hq.data(), hq.size(), cudaMemcpyHostToDevice));
+        CU(cudaMalloc(&dd, hd.size() * 4));
+        CU(cudaMemcpy(dd, hd.data(), hd.size() * 4, cudaMemcpyHostToDevice));
+        const size_t ny = (size_t) 16 * sh.n * sh.nj;
+        CU(cudaMalloc(&dy, ny * 4));
+        for (int nc : {1, 2, 4, 6, 8, 12, 16}) {
+            std::vector<iq::MvJob> jobs(sh.nj);
+            for (int j = 0; j < sh.nj; ++j) {
+                iq::MvJob& J = jobs[j];
+                J.w = dw + wb * j;
+                J.ld = rb;
+                J.type = iq::kQ5_K;
+                J.k = sh.k;
+                J.n = sh.n;
+                J.ncol = nc;
+                J.xq = dq;
+                J.xd = dd;
+                J.y = dy + (size_t) 16 * sh.n * j;
+                J.ycs = sh.n;
+            }
+            std::vector<float> ref, got(ny);
+            std::printf("%-28s cols %2d:", sh.name, nc);
+            for (int mode : {0, 1, 2, 4}) {
+                iq::set_mv_rows(mode);
+                CU(cudaMemset(dy, 0, ny * 4));
+                iq::mv(jobs.data(), sh.nj, s);
+                CU(cudaStreamSynchronize(s));
+                CU(cudaMemcpy(got.data(), dy, ny * 4, cudaMemcpyDeviceToHost));
+                const int reps = 50;
+                cudaEventRecord(a, s);
+                for (int i = 0; i < reps; ++i) iq::mv(jobs.data(), sh.nj, s);
+                cudaEventRecord(e, s);
+                CU(cudaEventSynchronize(e));
+                float ms = 0;
+                cudaEventElapsedTime(&ms, a, e);
+                const double us = ms * 1000.0 / reps;
+                bool same = true;
+                if (mode == 0) ref = got;
+                else same = std::memcmp(ref.data(), got.data(), ny * 4) == 0;
+                std::printf("  R%d %6.1f us %4.0f GB/s%s", mode, us, (double) wb * sh.nj / (us * 1e-6) / 1e9, same ? "" : " DIFF");
+            }
+            std::printf("\n");
+        }
+        iq::set_mv_rows(0);
+        cudaFree(dw), cudaFree(dq), cudaFree(dd), cudaFree(dy);
+    }
+}
+
 int main(int argc, char** argv) {
     cudaStream_t s;
     CU(cudaStreamCreate(&s));
@@ -1903,6 +1977,10 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "--bench") == 0) {
         bench(s);
         bench_q(s);
+        return 0;
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--bench-iqmv") == 0) {
+        bench_iqmv(s);
         return 0;
     }
     if (argc >= 2 && std::strcmp(argv[1], "--bench-q") == 0) {

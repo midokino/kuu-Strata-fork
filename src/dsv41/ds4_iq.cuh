@@ -137,6 +137,7 @@ struct MvJob {
     float alpha = 1.0f;
 };
 bool mv(const MvJob* jobs, int n, cudaStream_t s);
+void set_mv_rows(int r);   // (local) STRATA_DS4_MV_R's value, for the bench (0: mv_kernel as before)
 
 /// n rows of k values of a matrix of the type (ld bytes a row) as BF16 (bf16) or F16 bits, dst[n][k]: the chunked prompt path's
 /// dense GEMM operand.  false: a type not covered.

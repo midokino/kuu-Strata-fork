@@ -938,6 +938,55 @@ __global__ void __launch_bounds__(kThreads) mv_kernel(const Jobs J) {
         }
 }
 
+// (local) STRATA_DS4_MV_R=<R> (2 or 4): the dense matrices' GEMV (Q5_K / Q6_K: attention, shared experts) with R rows a
+// warp - each sub-block of every column's activations loaded once and dotted with R rows' decoded weights - and an 8-column
+// form for 5-8 columns.  A row's sums are added in mv_kernel's order (the same lane, the same sub-blocks, the same fmaf), so
+// the outputs are its bits.  (11/23 nsys: the 16-column mv_kernel ran the decode windows' wq_b / wo_a / wo_b at a third of
+// the bandwidth the 1-column one reached on the same matrix, 127 against 49 us, inside the stretch where the CPU lane idles.)
+template <int T, int NC, int R>
+__global__ void __launch_bounds__(kThreads) mv_kernel_r(const Jobs J) {
+    __shared__ uint32_t tab[Ty<T>::TAB > 0 ? Ty<T>::TAB : 1];
+    load_tab<T>(tab);
+    __syncthreads();
+    const MvJob& b = J.j[blockIdx.y];
+    const int row0 = (blockIdx.x * kWarps + (threadIdx.x >> 5)) * R, lane = threadIdx.x & 31;
+    if (row0 >= b.n) return;
+    const int nsb = b.k / 32;
+    float acc[R][NC];
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int c = 0; c < NC; ++c) acc[r][c] = 0.0f;
+    for (int kb = lane; kb < nsb; kb += 32) {
+        Sub s[R];
+#pragma unroll
+        for (int r = 0; r < R; ++r)
+            if (row0 + r < b.n) decode<T>(b.w + (size_t) (row0 + r) * b.ld, kb, tab, s[r]);
+#pragma unroll
+        for (int c = 0; c < NC; ++c)
+            if (c < b.ncol) {
+                const int4* xp = (const int4*) (b.xq + (size_t) c * b.k + (size_t) kb * 32);
+                const int4 x0 = xp[0], x1 = xp[1];
+                const float dx = b.xd[(size_t) c * nsb + kb];
+#pragma unroll
+                for (int r = 0; r < R; ++r)
+                    if (row0 + r < b.n) acc[r][c] = fmaf(dx, sub_dot<T>(s[r], x0, x1), acc[r][c]);
+            }
+    }
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int c = 0; c < NC; ++c)
+            if (c < b.ncol) {
+                const float v = warp_sum(acc[r][c]);
+                if (lane == 0 && row0 + r < b.n) b.y[c * b.ycs + row0 + r] = b.alpha * v + (b.bias != nullptr ? b.bias[row0 + r] : 0.0f);
+            }
+}
+int mv_rows_mode = [] {
+    const char* v = std::getenv("STRATA_DS4_MV_R");
+    return v != nullptr ? std::atoi(v) : 0;
+}();
+
 // ---------------------------------------------------------------- the prompt sets' light experts
 // A set's experts of a few rows (<= kLightRows: a prompt of a few hundred tokens spreads ~10 over most of 384 experts)
 // in the token kernels' form: each weight sub-block decoded once and dotted with every row's int8 input (rounded per 32
@@ -1297,6 +1346,18 @@ void mv_nc(const Jobs& J, int nj, int max_n, int max_c, cudaStream_t s) {
             strata_ds4_launch(mv_kernel<T, 4>, grid, kThreads, 0, s, K);
         }
         return;
+    }
+#endif
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_METAL)
+    if constexpr (T == kQ5_K || T == kQ6_K) {   // (local) STRATA_DS4_MV_R
+        const int R = mv_rows_mode;
+        if (max_c > 1 && (R == 1 || R == 2 || R == 4)) {
+            const dim3 gr((unsigned) ((max_n + kWarps * R - 1) / (kWarps * R)), (unsigned) nj);
+#define MVR_(NC) { if (R == 1) strata_ds4_launch(mv_kernel_r<T, NC, 1>, gr, kThreads, 0, s, J); else if (R == 2) strata_ds4_launch(mv_kernel_r<T, NC, 2>, gr, kThreads, 0, s, J); else strata_ds4_launch(mv_kernel_r<T, NC, 4>, gr, kThreads, 0, s, J); }
+            if (max_c <= 4) MVR_(4) else if (max_c <= 8) MVR_(8) else MVR_(16)
+#undef MVR_
+            return;
+        }
     }
 #endif
     if (max_c <= 1) strata_ds4_launch(mv_kernel<T, 1>, grid, kThreads, 0, s, J);
@@ -1730,6 +1791,8 @@ void gather_f16(const uint16_t* x, int ldx, const int* idx, int n, int k, uint16
 void swiglu_f16(const float* gu, int ld, int n, int ff, float limit, uint16_t* h, int ldh, cudaStream_t s) {
     strata_ds4_launch(swiglu_f16_kernel, grid_for((long long) n * ff), kThreads, 0, s, gu, ld, n, ff, limit, h, ldh);
 }
+
+void set_mv_rows(int r) { mv_rows_mode = r; }   // (local) STRATA_DS4_MV_R, for the bench
 
 bool mv(const MvJob* jobs, int n, cudaStream_t s) {
 #if defined(STRATA_METAL)
