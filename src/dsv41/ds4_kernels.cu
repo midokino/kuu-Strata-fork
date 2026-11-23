@@ -27,6 +27,8 @@
 namespace strata::ds4 {
 const unsigned* seq_base_dev = nullptr;   // (local) STRATA_DS4_SEQ_ALIGN, see ds4_kernels.cuh
 unsigned seq_base_val = 0;
+const long long* pos_base_dev = nullptr;
+long long pos_base_val = 0;
 namespace {
 
 constexpr int kThreads = 256;
@@ -169,7 +171,8 @@ __global__ void __launch_bounds__(kThreads) finish_kernel(float* x, int len, lon
     }
     if (f.rd > 0) {
         const int r0 = len - f.rd;
-        const int pos = f.pos + (int) (blockIdx.x / f.vpp) * f.pos_step;
+        const int pos = (f.pos_base != nullptr ? (int) *f.pos_base : 0) + f.pos +
+                        (int) (blockIdx.x / f.vpp) * f.pos_step;
 #pragma unroll
         for (int j = 0; j < kFinMax; ++j) {
             if (j >= nj) break;
@@ -208,7 +211,10 @@ __global__ void __launch_bounds__(kThreads) finish_kernel(float* x, int len, lon
     }
     if (kPack) {   // the same roundings, written as their codes and each group's scale (the readers' q * s: r exactly)
         const int g = f.quant == 2 ? 16 : 32;
-        uint8_t* pr = f.pdst + (long long) blockIdx.x * f.pdst_stride;
+        long long row = blockIdx.x;
+        if (f.pdst_by_pos)   // (local) the packed row's index from the window's position (a recorded window's pdst repeats)
+            row += ((f.pos_base != nullptr ? *f.pos_base : 0) + f.pos) / f.pos_step;
+        uint8_t* pr = f.pdst + row * f.pdst_stride;
 #pragma unroll
         for (int j = 0; j < kFinMax; ++j) {
             if (j >= nj) break;
@@ -600,7 +606,8 @@ __global__ void swiglu_kernel(const float* __restrict__ g, const float* __restri
 __global__ void __launch_bounds__(512) compress_kernel(const float* __restrict__ kv, const float* __restrict__ score,
                                                        float* kv_state, float* score_state, int ratio, int p0, int T,
                                                        int d, const float* __restrict__ w, float eps,
-                                                       float* __restrict__ latent) {
+                                                       float* __restrict__ latent, const long long* pbase) {
+    if (pbase != nullptr) p0 += (int) *pbase;
     int g = 0;
     for (int t = 0; t < T; ++t) {
         const int slot = (p0 + t) % ratio;
@@ -1324,7 +1331,8 @@ __global__ void __launch_bounds__(kThreads) sparse_attn_wmma_kernel(const float*
 
 // the ring's rows are kKvFp8: E4M3 codes, a UE8M0 scale per 32 (decoded: exactly the BF16 values they were made from)
 __global__ void ring_to_ext_kernel(const uint8_t* __restrict__ ring, uint16_t* __restrict__ ext, long long p0, int n,
-                                   int d) {
+                                   int d, const long long* pbase) {
+    if (pbase != nullptr) p0 += *pbase;
     const int r = blockIdx.x;
     const long long p = p0 - n + r;
     const uint8_t* row = ring + (size_t) (p >= 0 ? p % n : 0) * kv_row_bytes(kKvFp8, d);
@@ -1337,7 +1345,8 @@ __global__ void ring_to_ext_kernel(const uint8_t* __restrict__ ring, uint16_t* _
 // rounding's own scale, so each v / 2^k is that E4M3 value times a power of two >= 1, at most 448 - an E4M3 value again
 __global__ void __launch_bounds__(kThreads) ext_to_ring_kernel(const uint16_t* __restrict__ ext,
                                                                uint8_t* __restrict__ ring, long long p0, int n, int T,
-                                                               int d, uint8_t* __restrict__ backup) {
+                                                               int d, uint8_t* __restrict__ backup, const long long* pbase) {
+    if (pbase != nullptr) p0 += *pbase;
     const int t = blockIdx.x;
     if (T - t > n) return;   // overwritten by a later row of the window anyway
     const size_t rb = kv_row_bytes(kKvFp8, d);
@@ -2300,6 +2309,16 @@ void embed(const uint16_t* rows, int T, float* h, int dim, int hc, cudaStream_t 
 }
 
 void finish(float* x, int n_vec, int len, long long stride, const Finish& f, cudaStream_t s) {
+    // (local) STRATA_DS4_SEQ_ALIGN: a rotary finish inside a decode window takes its position from the window's base
+    Finish g = f;
+    if (pos_base_dev != nullptr && f.rd > 0) {
+        g.pos = (int) pos_arg(f.pos);
+        g.pos_base = pos_base_dev;
+        if (f.pdst != nullptr && f.vpp == 1 && f.pos_step > 0 && f.pos % f.pos_step == 0) {   // (a compressed row: pos = row * R)
+            g.pdst = f.pdst - (long long) (f.pos / f.pos_step) * f.pdst_stride;
+            g.pdst_by_pos = 1;
+        }
+    }
     if (len > kFinMax * kThreads) {
         std::fprintf(stderr, "ds4 finish: a vector of %d values is more than %d\n", len, kFinMax * kThreads);
         return;
@@ -2314,13 +2333,13 @@ void finish(float* x, int n_vec, int len, long long stride, const Finish& f, cud
         const auto& mp = *reinterpret_cast<const strata::dsv41::metal_host::FinishIn*>(&f);
         if (strata::dsv41::metal_host::finish(x, n_vec, len, stride, mp)) return;   // finish_kernel<true> (the KV pack)
 #endif
-        strata_ds4_launch(finish_kernel<true>, n_vec, kThreads, 0, s, x, len, stride, f);
+        strata_ds4_launch(finish_kernel<true>, n_vec, kThreads, 0, s, x, len, stride, g);
     } else {
 #if defined(STRATA_METAL)
         const auto& mf = *reinterpret_cast<const strata::dsv41::metal_host::FinishIn*>(&f);
         if (strata::dsv41::metal_host::finish(x, n_vec, len, stride, mf)) return;   // the ported MSL kernel
 #endif
-        strata_ds4_launch(finish_kernel<false>, n_vec, kThreads, 0, s, x, len, stride, f);
+        strata_ds4_launch(finish_kernel<false>, n_vec, kThreads, 0, s, x, len, stride, g);
     }
 }
 
@@ -2513,7 +2532,8 @@ void compress_win(const float* kv, const float* score, float* kv_state, float* s
     // compress_kernel on the Metal dispatch; the launch below is the fallback
     if (strata::dsv41::metal_host::compress_win(kv, score, kv_state, score_state, ratio, p0, T, d, w, eps, latent)) return;
 #endif
-    strata_ds4_launch(compress_kernel, 1, 512, 0, s, kv, score, kv_state, score_state, ratio, p0, T, d, w, eps, latent);
+    strata_ds4_launch(compress_kernel, 1, 512, 0, s, kv, score, kv_state, score_state, ratio, (int) pos_arg(p0), T, d, w, eps,
+                      latent, pos_base_dev);
 }
 
 void index_score(const float* q, const float* w, const void* k, int heads, int hd, int T, int n, const int* cand,
@@ -2664,7 +2684,7 @@ void ring_to_ext(const uint8_t* ring, uint16_t* ext, int64_t p0, int n, int d, c
 #if defined(STRATA_METAL)
     if (strata::dsv41::metal_host::ring_to_ext(ring, ext, (long long) p0, n, d, kv_row_bytes(kKvFp8, d))) return;
 #endif
-    strata_ds4_launch(ring_to_ext_kernel, n, kThreads, 0, s, ring, ext, (long long) p0, n, d);
+    strata_ds4_launch(ring_to_ext_kernel, n, kThreads, 0, s, ring, ext, pos_arg(p0), n, d, pos_base_dev);
 }
 void ext_to_ring(const uint16_t* ext, uint8_t* ring, int64_t p0, int n, int T, int d, cudaStream_t s, uint8_t* backup) {
     if (d % 32 != 0) {
@@ -2674,7 +2694,7 @@ void ext_to_ring(const uint16_t* ext, uint8_t* ring, int64_t p0, int n, int T, i
 #if defined(STRATA_METAL)
     if (strata::dsv41::metal_host::ext_to_ring(ext, ring, (long long) p0, n, T, d, kv_row_bytes(kKvFp8, d), backup)) return;
 #endif
-    strata_ds4_launch(ext_to_ring_kernel, T, kThreads, 0, s, ext, ring, (long long) p0, n, T, d, backup);
+    strata_ds4_launch(ext_to_ring_kernel, T, kThreads, 0, s, ext, ring, pos_arg(p0), n, T, d, backup, pos_base_dev);
 }
 void ring_restore(uint8_t* ring, const uint8_t* backup, int64_t p0, int n, int keep, int T, int d, cudaStream_t s) {
 #if defined(STRATA_METAL)

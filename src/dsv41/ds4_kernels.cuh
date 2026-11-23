@@ -54,6 +54,8 @@ struct Finish {
     long long dst_stride = 0;
     uint8_t* pdst = nullptr;
     long long pdst_stride = 0;
+    const long long* pos_base = nullptr;   // (local) set by finish(): pos is an offset from *pos_base
+    int pdst_by_pos = 0;                   // (local) set by finish(): pdst is the cache's row 0, the row (pos / pos_step)
 };
 void finish(float* x, int n_vec, int len, long long stride, const Finish& f, cudaStream_t s);
 
@@ -224,6 +226,11 @@ constexpr int kRing = 64;
 extern const unsigned* seq_base_dev;
 extern unsigned seq_base_val;
 inline unsigned seq_arg(unsigned seq) { return seq_base_dev != nullptr ? seq - seq_base_val : seq; }
+/// ... and the window's first position the same way (pos_base_dev / pos_base_val): the KV ring copies, the compressor
+/// and the rotary finish take positions as offsets from it
+extern const long long* pos_base_dev;
+extern long long pos_base_val;
+inline long long pos_arg(long long p) { return pos_base_dev != nullptr ? p - pos_base_val : p; }
 constexpr int kMaxDim = 8192;
 constexpr int kAhead1 = 16, kAhead = kAhead1 + kPicks;   // a token's guesses for the next layer, then the one after
 struct Req {

@@ -3966,7 +3966,14 @@ struct Model::Impl {
                 }
                 host_allocs.push_back(m);
                 seq_base_h = (unsigned*) m;
-                *seq_base_h = 0;
+                std::memset(m, 0, 64);
+                // (the kernels read the device copy: host-mapped reads cross PCIe each time, and the position is read by
+                //  every thread of the rotary finish - a mapped base made decode 40% slower)
+                cudaSetDevice(devs[0].id);
+                if (cudaMalloc(&win_vals_d, 64) != cudaSuccess || cudaMemset(win_vals_d, 0, 64) != cudaSuccess) {
+                    err = "device memory for the window's values";
+                    return false;
+                }
             }
             if (defer_mode() >= 2) {   // (local) STRATA_DS4_DEFER=2/3: the light experts' answers, a ring of their own
                 if (cudaHostAlloc(&m, sizeof(Resp) * kRing, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
@@ -14149,7 +14156,8 @@ struct Model::Impl {
         }();
         return on;
     }
-    unsigned* seq_base_h = nullptr;   // (mapped: the device reads it when the window's mailbox kernels run)
+    unsigned* seq_base_h = nullptr;   // (pinned: the window's sequence base at 0, first position at 8 - staged here)
+    void* win_vals_d = nullptr;       // (their device copy, made at the window's start: what the kernels read)
     unsigned win_seq_base = 0;        // (the base plan_window gave the window being launched)
     bool win_aligned = false;
     void align_seq() {
@@ -14522,20 +14530,29 @@ struct Model::Impl {
         const double tl = now_ms();
         if (win_aligned) {   // (local) STRATA_DS4_SEQ_ALIGN: the mailbox kernels launched now read the base when they run
             *(volatile unsigned*) seq_base_h = win_seq_base;
+            long long* pb = (long long*) ((char*) seq_base_h + 8);   // (the window's first position, the same block)
+            *(volatile long long*) pb = (long long) p0;
             std::atomic_thread_fence(std::memory_order_release);
-            strata::ds4::seq_base_dev = seq_base_h;
+            cudaSetDevice(devs[0].id);
+            CK(cudaMemcpyAsync(win_vals_d, seq_base_h, 16, cudaMemcpyHostToDevice, devs[0].st));
+            strata::ds4::seq_base_dev = (const unsigned*) win_vals_d;
             strata::ds4::seq_base_val = win_seq_base;
+            strata::ds4::pos_base_dev = (const long long*) ((char*) win_vals_d + 8);
+            strata::ds4::pos_base_val = (long long) p0;
         }
-        struct SeqOff {   // (the drafter's and every other launch after the window's: plain sequence numbers again)
+        struct SeqOff {   // (the drafter's and every other launch after the window's: plain numbers again)
             bool on;
-            ~SeqOff() { if (on) strata::ds4::seq_base_dev = nullptr; }
+            ~SeqOff() {
+                if (on) strata::ds4::seq_base_dev = nullptr, strata::ds4::pos_base_dev = nullptr;
+            }
         } seq_off{win_aligned};
         if (graph_on()) {
             if (!forward_graph(p0, T, err)) return false;
         } else if (par) {
             if (!forward_par(p0, T, err)) return false;
         } else if (!forward_serial(p0, T, err)) return false;
-        if (win_aligned) strata::ds4::seq_base_dev = nullptr;   // (before the head and the drafter's seeding launch)
+        if (win_aligned) strata::ds4::seq_base_dev = nullptr, strata::ds4::pos_base_dev = nullptr;   // (before the head's
+                                                                                                  //  and the drafter's)
         st.layer_ms += now_ms() - tl;
         for (auto& b : eg_win)
             if (b->live) eg_finish(*b);
