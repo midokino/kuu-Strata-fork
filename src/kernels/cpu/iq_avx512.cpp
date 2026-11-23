@@ -399,8 +399,162 @@ inline float hsum8_ggml(__m256 x) {
     return _mm_cvtss_f32(s);
 }
 
+// ---- (local) STRATA_IQ_XXS_PERM=1: an IQ2_XXS (and IQ2_XS) block's 256 values decoded at once by permutes instead of 32 scalar grid loads.
+// Every byte of iq2xxs_grid is 0x08, 0x19 or 0x2b, so an entry is eight 2-bit codes (16 bits) and the table 512 bytes - eight
+// zmm registers: the block's 32 grid indices are gathered by one vpermb, looked up 32 at a time by four vpermt2w and two
+// blends, and the codes turned back into bytes by vpmultishiftqb + vpshufb; the 32 sign indices and the 8 scales likewise in
+// vectors.  The per-token arithmetic is row_dot_x's, so the sums (and the outputs) are its bits.  (11/23 uProf: the scalar
+// decode ran the one-token rows at IPC 5.8 - about 310 instructions a block, the kernel bound by its instruction count.)
+// (1: IQ2_XXS; 2: IQ2_XS as well - its 1 KB table takes 16 registers and gained 2-8% only, so not by default)
+const int xxs_perm = [] {
+    const char* v = std::getenv("STRATA_IQ_XXS_PERM");
+    return v != nullptr ? std::atoi(v) : 0;
+}();
+template <int N> struct GridTab {   // a grid of N entries as N 16-bit code words in N / 32 registers
+    __m512i t[N / 32];
+    bool ok = true;
+    explicit GridTab(const uint64_t* grid) {
+        alignas(64) uint16_t c[N];
+        for (int e = 0; e < N; ++e) {
+            uint16_t v = 0;
+            for (int k = 0; k < 8; ++k) {
+                const int x = (int) ((grid[e] >> (8 * k)) & 255);
+                const int code = x == 0x08 ? 0 : x == 0x19 ? 1 : x == 0x2b ? 2 : 3;
+                if (code == 3) ok = false;
+                v |= (uint16_t) (code << (2 * k));
+            }
+            c[e] = v;
+        }
+        for (int i = 0; i < N / 32; ++i) t[i] = _mm512_load_si512((const void*) (c + 32 * i));
+    }
+};
+using XxsTab = GridTab<256>;
+const XxsTab& xxs_tab() {
+    static const XxsTab t(iq2xxs_grid);
+    return t;
+}
+const GridTab<512>& xs_tab() {
+    static const GridTab<512> t(iq2xs_grid);
+    return t;
+}
+// 32 code words -> chunk j's 64 bytes (the grid's 0x08 / 0x19 / 0x2b)
+template <int J> inline __m512i codes_to_bytes(__m512i r) {
+    const __m512i shifts = _mm512_set1_epi64(0x0E0C0A0806040200ll);
+    const __m512i lut = _mm512_set4_epi32(0, 0, 0, 0x002B1908);
+    const __m128i w = _mm512_extracti32x4_epi32(r, J);
+    return _mm512_shuffle_epi8(lut, _mm512_and_si512(_mm512_multishift_epi64_epi8(shifts, _mm512_cvtepu16_epi64(w)), _mm512_set1_epi8(3)));
+}
+// IQ2_XS: the 32 words of qs are (9-bit grid index | 7-bit sign index << 9), already in chunk order
+inline void decode_block_xs(const uint8_t* blk, const GridTab<512>& T, __m512i g[4], __mmask64 m[4], __m512i sc[4]) {
+    const __m512i q = _mm512_loadu_si512((const void*) (blk + 2));
+    const __m512i iw = _mm512_and_si512(q, _mm512_set1_epi16(511));
+    const __m512i r0 = _mm512_permutex2var_epi16(T.t[0], iw, T.t[1]), r1 = _mm512_permutex2var_epi16(T.t[2], iw, T.t[3]);
+    const __m512i r2 = _mm512_permutex2var_epi16(T.t[4], iw, T.t[5]), r3 = _mm512_permutex2var_epi16(T.t[6], iw, T.t[7]);
+    const __m512i r4 = _mm512_permutex2var_epi16(T.t[8], iw, T.t[9]), r5 = _mm512_permutex2var_epi16(T.t[10], iw, T.t[11]);
+    const __m512i r6 = _mm512_permutex2var_epi16(T.t[12], iw, T.t[13]), r7 = _mm512_permutex2var_epi16(T.t[14], iw, T.t[15]);
+    const __mmask32 b6 = _mm512_test_epi16_mask(iw, _mm512_set1_epi16(64)), b7 = _mm512_test_epi16_mask(iw, _mm512_set1_epi16(128)),
+                    b8 = _mm512_test_epi16_mask(iw, _mm512_set1_epi16(256));
+    const __m512i lo = _mm512_mask_blend_epi16(b7, _mm512_mask_blend_epi16(b6, r0, r1), _mm512_mask_blend_epi16(b6, r2, r3));
+    const __m512i hi = _mm512_mask_blend_epi16(b7, _mm512_mask_blend_epi16(b6, r4, r5), _mm512_mask_blend_epi16(b6, r6, r7));
+    const __m512i r = _mm512_mask_blend_epi16(b8, lo, hi);
+    g[0] = codes_to_bytes<0>(r);
+    g[1] = codes_to_bytes<1>(r);
+    g[2] = codes_to_bytes<2>(r);
+    g[3] = codes_to_bytes<3>(r);
+    // the signs: byte = the 7-bit index | its parity << 7 (ksigns_iq2xs)
+    __m512i si = _mm512_srli_epi16(q, 9), x = si;
+    x = _mm512_xor_si512(x, _mm512_srli_epi16(x, 4));
+    x = _mm512_xor_si512(x, _mm512_srli_epi16(x, 2));
+    x = _mm512_xor_si512(x, _mm512_srli_epi16(x, 1));
+    si = _mm512_or_si512(si, _mm512_slli_epi16(_mm512_and_si512(x, _mm512_set1_epi16(1)), 7));
+    const __m256i sb = _mm512_cvtepi16_epi8(si);
+    m[0] = _cvtu64_mask64((uint64_t) _mm256_extract_epi64(sb, 0));
+    m[1] = _cvtu64_mask64((uint64_t) _mm256_extract_epi64(sb, 1));
+    m[2] = _cvtu64_mask64((uint64_t) _mm256_extract_epi64(sb, 2));
+    m[3] = _cvtu64_mask64((uint64_t) _mm256_extract_epi64(sb, 3));
+    for (int j = 0; j < 4; ++j) {
+        const uint8_t s0 = blk[66 + 2 * j], s1 = blk[66 + 2 * j + 1];
+        sc[j] = scales4(2 * (s0 & 15) + 1, 2 * (s0 >> 4) + 1, 2 * (s1 & 15) + 1, 2 * (s1 >> 4) + 1);
+    }
+}
+inline void decode_block_xxs(const uint8_t* blk, const XxsTab& T, __m512i g[4], __mmask64 m[4], __m512i sc[4]) {
+    const __m512i q = _mm512_loadu_si512((const void*) (blk + 2));   // qs: 64 bytes (the block is 66)
+    // the grid indices: bytes 16j + 0..3 and 16j + 8..11 -> byte 8j + k (chunk j's qwords in order)
+    const __m512i pidx = _mm512_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                         59, 58, 57, 56, 51, 50, 49, 48, 43, 42, 41, 40, 35, 34, 33, 32,
+                                         27, 26, 25, 24, 19, 18, 17, 16, 11, 10, 9, 8, 3, 2, 1, 0);
+    const __m512i iw = _mm512_cvtepu8_epi16(_mm512_castsi512_si256(_mm512_permutexvar_epi8(pidx, q)));
+    const __m512i r0 = _mm512_permutex2var_epi16(T.t[0], iw, T.t[1]), r1 = _mm512_permutex2var_epi16(T.t[2], iw, T.t[3]);
+    const __m512i r2 = _mm512_permutex2var_epi16(T.t[4], iw, T.t[5]), r3 = _mm512_permutex2var_epi16(T.t[6], iw, T.t[7]);
+    const __mmask32 b6 = _mm512_test_epi16_mask(iw, _mm512_set1_epi16(64)), b7 = _mm512_test_epi16_mask(iw, _mm512_set1_epi16(128));
+    const __m512i r = _mm512_mask_blend_epi16(b7, _mm512_mask_blend_epi16(b6, r0, r1), _mm512_mask_blend_epi16(b6, r2, r3));
+    g[0] = codes_to_bytes<0>(r);
+    g[1] = codes_to_bytes<1>(r);
+    g[2] = codes_to_bytes<2>(r);
+    g[3] = codes_to_bytes<3>(r);
+    // the signs: lane 8j + k <- dword 4j + 1 (k < 4) or 4j + 3, shifted 7 (k % 4); byte = the 7-bit index | its parity << 7
+    const __m512i sh = _mm512_set_epi32(21, 14, 7, 0, 21, 14, 7, 0, 21, 14, 7, 0, 21, 14, 7, 0);
+    const __m512i sidx_a = _mm512_set_epi32(7, 7, 7, 7, 5, 5, 5, 5, 3, 3, 3, 3, 1, 1, 1, 1);
+    const __m512i sidx_b = _mm512_set_epi32(15, 15, 15, 15, 13, 13, 13, 13, 11, 11, 11, 11, 9, 9, 9, 9);
+    const __m512i m127 = _mm512_set1_epi32(127), one = _mm512_set1_epi32(1);
+    __m512i sa = _mm512_and_si512(_mm512_srlv_epi32(_mm512_permutexvar_epi32(sidx_a, q), sh), m127);
+    __m512i sb = _mm512_and_si512(_mm512_srlv_epi32(_mm512_permutexvar_epi32(sidx_b, q), sh), m127);
+    sa = _mm512_or_si512(sa, _mm512_slli_epi32(_mm512_and_si512(_mm512_popcnt_epi32(sa), one), 7));
+    sb = _mm512_or_si512(sb, _mm512_slli_epi32(_mm512_and_si512(_mm512_popcnt_epi32(sb), one), 7));
+    const __m128i ba = _mm512_cvtepi32_epi8(sa), bb = _mm512_cvtepi32_epi8(sb);
+    m[0] = _cvtu64_mask64((uint64_t) _mm_cvtsi128_si64(ba));
+    m[1] = _cvtu64_mask64((uint64_t) _mm_extract_epi64(ba, 1));
+    m[2] = _cvtu64_mask64((uint64_t) _mm_cvtsi128_si64(bb));
+    m[3] = _cvtu64_mask64((uint64_t) _mm_extract_epi64(bb, 1));
+    // the scales: 2 (word >> 28) + 1 of dwords 4j + 1 (lanes 0-15) and 4j + 3 (lanes 16-31), as scales4(sa, sa, sb, sb)
+    const __m512i s = _mm512_or_si512(_mm512_slli_epi32(_mm512_srli_epi32(q, 28), 1), one);
+    for (int j = 0; j < 4; ++j) {
+        const short wa = (short) (2 * (4 * j + 1)), wb = (short) (2 * (4 * j + 3));
+        sc[j] = _mm512_permutexvar_epi16(_mm512_set_epi16(wb, wb, wb, wb, wb, wb, wb, wb, wb, wb, wb, wb, wb, wb, wb, wb,
+                                                          wa, wa, wa, wa, wa, wa, wa, wa, wa, wa, wa, wa, wa, wa, wa, wa), s);
+    }
+}
+template <int TY, int NT>
+inline void row_dot_xp(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
+    constexpr int kBytes = TY == 16 ? 66 : 74;
+    const auto& T = [] () -> const auto& { if constexpr (TY == 16) return xxs_tab(); else return xs_tab(); }();
+    __m256 accf[NT];
+    for (int t = 0; t < NT; ++t) accf[t] = _mm256_setzero_ps();
+    const __m512i zero = _mm512_setzero_si512();
+    for (int i = 0; i < nblocks; ++i) {
+        const uint8_t* blk = row + (size_t) i * kBytes;
+        __m512i g[4], sc[4];
+        __mmask64 m[4];
+        if constexpr (TY == 16) decode_block_xxs(blk, T, g, m, sc);
+        else decode_block_xs(blk, T, g, m, sc);
+        __m512i acci[NT];
+        for (int t = 0; t < NT; ++t) acci[t] = _mm512_setzero_si512();
+        for (int j = 0; j < 4; ++j)
+            for (int t = 0; t < NT; ++t) {
+                const __m512i yv = _mm512_loadu_si512((const void*) (y[t][i].qs + 64 * j));
+                const __m512i ys = _mm512_mask_sub_epi8(yv, m[j], zero, yv);
+                acci[t] = _mm512_dpwssd_epi32(acci[t], _mm512_maddubs_epi16(g[j], ys), sc[j]);
+            }
+        const float dx = h2f(u16(blk));
+        for (int t = 0; t < NT; ++t)
+            accf[t] = _mm256_fmadd_ps(_mm256_set1_ps(dx * y[t][i].d), _mm256_cvtepi32_ps(fold256(acci[t])), accf[t]);
+    }
+    for (int t = 0; t < NT; ++t) res[t] = 0.125f * hsum8_ggml(accf[t]);
+}
+
 template <int TY, int NT>
 inline void row_dot_x(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
+    if constexpr (TY == 16) {
+        if (xxs_perm && xxs_tab().ok) {
+            row_dot_xp<16, NT>(row, nblocks, y, res);
+            return;
+        }
+    } else if constexpr (TY == 17) {
+        if (xxs_perm >= 2 && xs_tab().ok) {
+            row_dot_xp<17, NT>(row, nblocks, y, res);
+            return;
+        }
+    }
     __m256 accf[NT];
     for (int t = 0; t < NT; ++t) accf[t] = _mm256_setzero_ps();
     const __m512i zero = _mm512_setzero_si512();
