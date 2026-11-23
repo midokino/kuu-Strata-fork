@@ -14359,8 +14359,97 @@ struct Model::Impl {
         CK(cudaGraphLaunch(ex, s));
         return true;
     }
+    // (local) STRATA_DS4_GRAPH=3 (with STRATA_DS4_SEQ_ALIGN): the layer taped (ds4_launch.h: its host side runs, its launches
+    // and copies are kept with their parameters' hash) and the executable graph kept for (layer, window size, hash) launched -
+    // no capture and no update once the hash is known.  A new hash: the tape recorded into a new graph (kept up to
+    // STRATA_DS4_TAPE_MAX, 4096); past that, or if the record fails, the tape played on the stream as plain launches.
+    // STRATA_DS4_TAPE_CHECK=<n>: the first n windows' tapes run inside a capture - a node in it is a call the tape missed
+    // (reported, and the engine exits).
+    std::unordered_map<uint64_t, cudaGraphExec_t> gexec_tape;
+    long tp_hit = 0, tp_new = 0, tp_play = 0;
+    double tp_dry_ms = 0, tp_rec_ms = 0;
+    bool layer_taped(Layer& l, int64_t p0, int T, std::string& err) {
+        Dev& d = devs[(size_t) l.dev];
+        cudaSetDevice(d.id);
+        static Ds4Tape tape;
+        static const long check = [] { const char* v = std::getenv("STRATA_DS4_TAPE_CHECK"); return v ? std::atol(v) : 0L; }();
+        static const size_t cap = [] { const char* v = std::getenv("STRATA_DS4_TAPE_MAX"); return v ? (size_t) std::atol(v) : (size_t) 4096; }();
+        const double t0 = now_ms();
+        const bool chk = g_steps < check;
+        if (chk) CK(cudaStreamBeginCapture(d.st, cudaStreamCaptureModeRelaxed));
+        tape.reset(d.st);
+        strata_ds4_tape = &tape;
+        capturing = true;   // (tap's ev_seed wait: as in a capture)
+        const bool ok = tap(d, l.il, T, err) && layer(l, 0, p0, T, wplan, err);
+        capturing = false;
+        strata_ds4_tape = nullptr;
+        if (chk) {
+            cudaGraph_t gph = nullptr;
+            const cudaError_t e = cudaStreamEndCapture(d.st, &gph);
+            size_t nn = 0;
+            if (gph != nullptr) cudaGraphGetNodes(gph, nullptr, &nn);
+            if (e != cudaSuccess || nn != 0) {
+                std::fprintf(stderr, "ds4: (local) tape check: layer %d T %d: %zu calls outside the tape (%s)\n", l.il, T, nn,
+                             cudaGetErrorString(e));
+                if (gph != nullptr) {
+                    std::vector<cudaGraphNode_t> nodes(nn);
+                    cudaGraphGetNodes(gph, nodes.data(), &nn);
+                    for (cudaGraphNode_t nd : nodes) {
+                        cudaGraphNodeType ty;
+                        cudaGraphNodeGetType(nd, &ty);
+                        const char* fn = "-";
+                        if (ty == cudaGraphNodeTypeKernel) {
+                            cudaKernelNodeParams kp{};
+                            if (cudaGraphKernelNodeGetParams(nd, &kp) != cudaSuccess || cudaFuncGetName(&fn, kp.func) != cudaSuccess) fn = "?";
+                        }
+                        std::fprintf(stderr, "  node type %d %s\n", (int) ty, fn);
+                    }
+                }
+                std::fflush(stderr);
+                std::exit(3);
+            }
+            if (gph != nullptr) cudaGraphDestroy(gph);
+        }
+        if (!ok) return false;
+        const double t1 = now_ms();
+        tp_dry_ms += t1 - t0;
+        uint64_t key = tape.h;
+        key = (key ^ (uint64_t) l.il) * 1099511628211ull;
+        key = (key ^ (uint64_t) T) * 1099511628211ull;
+        if (auto it = gexec_tape.find(key); it != gexec_tape.end()) {
+            ++tp_hit;
+            CK(cudaGraphLaunch(it->second, d.st));
+            return true;
+        }
+        if (gexec_tape.size() < cap) {
+            cudaGraph_t gph = nullptr;
+            cudaError_t e = cudaStreamBeginCapture(d.st, cudaStreamCaptureModeRelaxed);
+            if (e == cudaSuccess) {
+                tape.play(d.st);
+                e = cudaStreamEndCapture(d.st, &gph);
+            }
+            cudaGraphExec_t ex = nullptr;
+            if (e == cudaSuccess && gph != nullptr) e = cudaGraphInstantiate(&ex, gph, 0);
+            if (gph != nullptr) cudaGraphDestroy(gph);
+            if (e == cudaSuccess && ex != nullptr) {
+                gexec_tape.emplace(key, ex);
+                ++tp_new;
+                tp_rec_ms += now_ms() - t1;
+                CK(cudaGraphLaunch(ex, d.st));
+                return true;
+            }
+            (void) cudaGetLastError();
+            static bool warned = false;
+            if (!warned) std::fprintf(stderr, "ds4: (local) tape: layer %d record failed (%s): played instead\n", l.il, cudaGetErrorString(e));
+            warned = true;
+        }
+        ++tp_play;
+        tape.play(d.st);
+        return true;
+    }
     // one layer (its drafter tap and the layer) recorded and launched (STRATA_DS4_GRAPH=2)
     bool layer_graphed(Layer& l, int64_t p0, int T, std::string& err) {
+        if (graph_mode() == 3) return layer_taped(l, p0, T, err);
         Dev& d = devs[(size_t) l.dev];
         cudaSetDevice(d.id);
         const double t0 = now_ms();
@@ -14442,11 +14531,15 @@ struct Model::Impl {
         std::fflush(f);
     }
     bool forward_graph(int64_t p0, int T, std::string& err) {
-        if (graph_mode() == 2 && !par) {   // (layer by layer, inside forward_serial)
+        if (graph_mode() >= 2 && !par) {   // (layer by layer, inside forward_serial)
             layer_graph = true;
             const bool ok = forward_serial(p0, T, err);
             layer_graph = false;
-            if (ok && (++g_steps == 20 || g_steps % 500 == 0))
+            if (ok && graph_mode() == 3) {
+                if (++g_steps == 20 || g_steps % 500 == 0)
+                    std::fprintf(stderr, "ds4: (local) graph (tape): %ld windows, %ld kept graphs launched, %ld recorded (%zu kept), %ld played, tape %.3f ms + record %.3f ms a window\n",
+                                 g_steps, tp_hit, tp_new, gexec_tape.size(), tp_play, tp_dry_ms / g_steps, tp_rec_ms / g_steps);
+            } else if (ok && (++g_steps == 20 || g_steps % 500 == 0))
                 std::fprintf(stderr, "ds4: (local) graph (layers): %ld windows, %ld updated, %ld instantiated, capture %.3f ms + update %.3f ms a window\n",
                              g_steps, g_upd, g_new, g_cap_ms / g_steps, g_inst_ms / g_steps);
             return ok;

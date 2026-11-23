@@ -24,6 +24,8 @@
 #include <mutex>
 #include <cstdio>
 
+thread_local Ds4Tape* strata_ds4_tape = nullptr;   // (local) STRATA_DS4_GRAPH=3: the layer being taped (ds4_launch.h)
+
 namespace strata::ds4 {
 const unsigned* seq_base_dev = nullptr;   // (local) STRATA_DS4_SEQ_ALIGN, see ds4_kernels.cuh
 unsigned seq_base_val = 0;
