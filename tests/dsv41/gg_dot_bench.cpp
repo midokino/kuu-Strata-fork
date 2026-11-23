@@ -12,6 +12,7 @@
 #include "strata/kernels/cpu/iq_avx512.hpp"
 #include "ggml.h"
 
+#include <immintrin.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -121,11 +122,149 @@ static int run_expert(int tg, int td, int threads, long mb, int nt, int reps) {
     return rc;
 }
 
+// ---- (local) --calls K: the engine's CPU-lane call on random experts - K experts a call (a decode layer hands the lane 4-5), gate+up
+// jobs of 64 rows, a barrier, h quantized by the calling thread, down jobs - on a pool of spinning workers (the engine's Pool: the
+// caller works too), call after call through experts far past L3.  GB/s of all three matrices; --variant picks the call's form.
+struct SpinPool {
+    int n;
+    std::vector<std::thread> th;
+    std::atomic<long> gen{0}, cur{0}, done{0};
+    std::atomic<bool> stop{false};
+    long njobs = 0;
+    const std::function<void(long)>* fn = nullptr;
+    explicit SpinPool(int threads) : n(threads) {
+        for (int k = 1; k < n; ++k)
+            th.emplace_back([this] {
+                long seen = 0;
+                for (;;) {
+                    long g;
+                    while ((g = gen.load(std::memory_order_acquire)) == seen) {
+                        if (stop.load(std::memory_order_relaxed)) return;
+                        _mm_pause();
+                    }
+                    seen = g;
+                    work();
+                }
+            });
+    }
+    void work() {
+        for (;;) {
+            const long j = cur.fetch_add(1, std::memory_order_relaxed);
+            if (j >= njobs) break;
+            (*fn)(j);
+            done.fetch_add(1, std::memory_order_release);
+        }
+    }
+    void run(long nj, const std::function<void(long)>& f) {
+        fn = &f;
+        njobs = nj;
+        cur.store(0);
+        done.store(0);
+        gen.fetch_add(1, std::memory_order_release);
+        work();
+        while (done.load(std::memory_order_acquire) < nj) _mm_pause();
+    }
+    ~SpinPool() {
+        stop = true;
+        gen.fetch_add(1);
+        for (auto& t : th) t.join();
+    }
+};
+
+static int run_calls(int tg, int td, int threads, long mb, int K, int reps, int variant) {
+    ggml_cpu_init();
+    const int E = 5120, FF = 2304, RB = 64;
+    IqCpu f;
+    std::string err;
+    if (!gg_cpu_fmt(tg, td, E, FF, f, err)) { std::fprintf(stderr, "gg_cpu_fmt: %s\n", err.c_str()); return 2; }
+    const size_t gbytes = f.gu_row * FF, dbytes = f.d_row * E, ebytes = 2 * gbytes + dbytes;
+    const int ne = (int) std::max((long) K * 2, (long) ((size_t) mb * 1000000 / ebytes)) / K * K;
+    std::vector<uint8_t> w((size_t) ne * ebytes);   // an expert: gate, up, down side by side (as a file's)
+    for (int e = 0; e < ne; ++e) {
+        fill_blocks(&w[(size_t) e * ebytes], gbytes, tg, 3 * (uint64_t) e + 1);
+        fill_blocks(&w[(size_t) e * ebytes + gbytes], gbytes, tg, 3 * (uint64_t) e + 2);
+        fill_blocks(&w[(size_t) e * ebytes + 2 * gbytes], dbytes, td, 3 * (uint64_t) e + 3);
+    }
+    std::vector<uint8_t> act(f.act_bytes);
+    {
+        uint64_t st = 12345;
+        std::vector<float> x((size_t) E);
+        for (auto& v : x) { st ^= st << 13; st ^= st >> 7; st ^= st << 17; v = ((float) (st % 2001) - 1000.0f) * 1e-3f; }
+        gg_cpu_quant(f.gu_act, x.data(), E, act.data());
+    }
+    std::vector<float> h((size_t) K * FF), y((size_t) K * E), ysum((size_t) E);
+    std::vector<uint8_t> hq((size_t) K * f.h_bytes);
+    SpinPool pool(threads);
+    const long gb = (FF + RB - 1) / RB, db = (E + RB - 1) / RB;
+    int e0 = 0;
+    std::function<void(long)> fgu = [&](long j) {
+        const int k = (int) (j / gb), r0 = (int) (j % gb) * RB, r1 = std::min(FF, r0 + RB);
+        const uint8_t* ex = &w[(size_t) (e0 + k) * ebytes];
+        const void* ap[1] = {act.data()};
+        float* hp[1] = {&h[(size_t) k * FF]};
+        gg_cpu_gate_up(f, ex, ex + gbytes, ap, 1, hp, r0, r1, 10.0f);
+    };
+    std::function<void(long)> fdn = [&](long j) {
+        const int k = (int) (j / db), r0 = (int) (j % db) * RB, r1 = std::min(E, r0 + RB);
+        const uint8_t* ex = &w[(size_t) (e0 + k) * ebytes];
+        const void* hp[1] = {&hq[(size_t) k * f.h_bytes]};
+        float* yp[1] = {&y[(size_t) k * E]};
+        gg_cpu_down(f, ex + 2 * gbytes, hp, 1, yp, r0, r1);
+    };
+    // variant 1: gate+up and down in one job list - expert k's down jobs after the gate+up jobs of experts k and k+1, each down
+    // job waiting (spinning) for its expert's h, which the thread finishing that expert's last gate+up job quantizes
+    std::vector<std::atomic<int>> left(K);
+    std::vector<std::atomic<int>> hready(K);
+    std::vector<long> order;
+    if (variant == 1) {
+        for (int k = 0; k <= K; ++k) {
+            if (k < K) for (long r = 0; r < gb; ++r) order.push_back((long) k * gb + r);
+            if (k >= 1) for (long r = 0; r < db; ++r) order.push_back(-1 - ((long) (k - 1) * db + r));
+        }
+    }
+    std::function<void(long)> fmix = [&](long j) {
+        const long o = order[(size_t) j];
+        if (o >= 0) {
+            fgu(o);
+            const int k = (int) (o / gb);
+            if (left[(size_t) k].fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                gg_cpu_quant(f.d_act, &h[(size_t) k * FF], FF, &hq[(size_t) k * f.h_bytes]);
+                hready[(size_t) k].store(1, std::memory_order_release);
+            }
+        } else {
+            const long d = -1 - o;
+            const int k = (int) (d / db);
+            while (!hready[(size_t) k].load(std::memory_order_acquire)) _mm_pause();
+            fdn(d);
+        }
+    };
+    double best = 1e30;
+    for (int r = 0; r < reps + 1; ++r) {
+        const auto t0 = clk::now();
+        for (e0 = 0; e0 + K <= ne; e0 += K) {
+            if (variant == 1) {
+                for (int k = 0; k < K; ++k) { left[(size_t) k].store((int) gb); hready[(size_t) k].store(0); }
+                pool.run((long) order.size(), fmix);
+            } else {
+                pool.run((long) K * gb, fgu);
+                for (int k = 0; k < K; ++k) gg_cpu_quant(f.d_act, &h[(size_t) k * FF], FF, &hq[(size_t) k * f.h_bytes]);
+                pool.run((long) K * db, fdn);
+            }
+            for (int k = 0; k < K; ++k) ysum[(size_t) (k * 7) % E] += y[(size_t) k * E];
+        }
+        if (r > 0) best = std::min(best, secs(t0));
+    }
+    const double gbt = (double) ne * ebytes / 1e9;
+    std::printf("calls of %d experts, gate/up %d down %d, threads %d, variant %d: %d experts %.2f GB, %.3f s = %.1f GB/s, %.3f ms a call (%g)\n", K,
+                tg, td, threads, variant, ne, gbt, best, gbt / best, best * 1e3 / (ne / K), (double) ysum[0]);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     int type = 18, threads = 32, nt = 1, reps = 3;
     long mb = 3072;
     bool exact = false, expert = false, k512 = false;
-    int dtype = -1;
+    int dtype = -1, calls = 0, variant = 0;
     std::string dump;   // --dump FILE: ggml-cpu's results (nt x rows floats) written raw - compare two builds with cmp
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -139,8 +278,11 @@ int main(int argc, char** argv) {
         else if (a == "--expert") expert = true;
         else if (a == "--k512") k512 = true;
         else if (a == "--dtype") dtype = (int) val();
+        else if (a == "--calls") calls = (int) val();
+        else if (a == "--variant") variant = (int) val();
         else if (a == "--dump" && i + 1 < argc) dump = argv[++i];
     }
+    if (calls > 0) return run_calls(type, dtype < 0 ? type : dtype, threads, mb, calls, reps, variant);
     if (expert) return run_expert(type, dtype < 0 ? type : dtype, threads, mb, nt, reps);
     ggml_cpu_init();
     const int n = 5120;   // a gate / up row
