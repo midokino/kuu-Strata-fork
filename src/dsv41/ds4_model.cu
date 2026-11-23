@@ -14539,11 +14539,13 @@ struct Model::Impl {
             strata::ds4::seq_base_val = win_seq_base;
             strata::ds4::pos_base_dev = (const long long*) ((char*) win_vals_d + 8);
             strata::ds4::pos_base_val = (long long) p0;
+            strata::ds4::row_stage_begin();   // (the window's row lists: slots from the start, in launch order)
+            strata::ds4::row_stage_on = true;
         }
         struct SeqOff {   // (the drafter's and every other launch after the window's: plain numbers again)
             bool on;
             ~SeqOff() {
-                if (on) strata::ds4::seq_base_dev = nullptr, strata::ds4::pos_base_dev = nullptr;
+                if (on) strata::ds4::seq_base_dev = nullptr, strata::ds4::pos_base_dev = nullptr, strata::ds4::row_stage_on = false;
             }
         } seq_off{win_aligned};
         if (graph_on()) {
@@ -14551,8 +14553,8 @@ struct Model::Impl {
         } else if (par) {
             if (!forward_par(p0, T, err)) return false;
         } else if (!forward_serial(p0, T, err)) return false;
-        if (win_aligned) strata::ds4::seq_base_dev = nullptr, strata::ds4::pos_base_dev = nullptr;   // (before the head's
-                                                                                                  //  and the drafter's)
+        if (win_aligned)   // (before the head's and the drafter's launches)
+            strata::ds4::seq_base_dev = nullptr, strata::ds4::pos_base_dev = nullptr, strata::ds4::row_stage_on = false;
         st.layer_ms += now_ms() - tl;
         for (auto& b : eg_win)
             if (b->live) eg_finish(*b);

@@ -231,6 +231,10 @@ inline unsigned seq_arg(unsigned seq) { return seq_base_dev != nullptr ? seq - s
 extern const long long* pos_base_dev;
 extern long long pos_base_val;
 inline long long pos_arg(long long p) { return pos_base_dev != nullptr ? p - pos_base_val : p; }
+/// ... and the window's row lists (Rows / AttnRows): staged each to its own device slot (the slots taken in the window's
+/// launch order, so the same slot each window) by a copy launched just before the kernel, which reads them from there
+extern bool row_stage_on;
+void row_stage_begin();
 constexpr int kMaxDim = 8192;
 constexpr int kAhead1 = 16, kAhead = kAhead1 + kPicks;   // a token's guesses for the next layer, then the one after
 struct Req {

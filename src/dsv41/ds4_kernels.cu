@@ -29,6 +29,42 @@ const unsigned* seq_base_dev = nullptr;   // (local) STRATA_DS4_SEQ_ALIGN, see d
 unsigned seq_base_val = 0;
 const long long* pos_base_dev = nullptr;
 long long pos_base_val = 0;
+bool row_stage_on = false;
+namespace {
+struct RowStage {
+    uint8_t* h = nullptr;
+    uint8_t* d = nullptr;
+    size_t cap = 0, cur = 0;
+    bool warned = false;
+};
+RowStage g_rows;
+// v copied into the window's next slot of the pinned staging block, and that slot to the device by a copy on s: the
+// device slot (nullptr when staging is off or full: the caller passes the struct by value as before)
+template <class S> const S* stage_rows(const S& v, cudaStream_t s) {
+    if (!row_stage_on) return nullptr;
+    if (g_rows.h == nullptr) {
+        const size_t cap = (size_t) 1 << 20;
+        if (cudaHostAlloc((void**) &g_rows.h, cap, cudaHostAllocPortable) != cudaSuccess) return nullptr;
+        if (cudaMalloc((void**) &g_rows.d, cap) != cudaSuccess) return nullptr;
+        g_rows.cap = cap;
+    }
+    const size_t sz = (sizeof(S) + 63) & ~(size_t) 63;
+    if (g_rows.cur + sz > g_rows.cap) {
+        if (!g_rows.warned) std::fprintf(stderr, "ds4: (local) row staging full: row lists by value\n");
+        g_rows.warned = true;
+        return nullptr;
+    }
+    std::memcpy(g_rows.h + g_rows.cur, &v, sizeof(S));
+    if (cudaMemcpyAsync(g_rows.d + g_rows.cur, g_rows.h + g_rows.cur, sizeof(S), cudaMemcpyHostToDevice, s) != cudaSuccess)
+        return nullptr;
+    const S* p = (const S*) (g_rows.d + g_rows.cur);
+    g_rows.cur += sz;
+    return p;
+}
+const Rows kNoRows{};
+const AttnRows kNoAttnRows{};
+}  // namespace
+void row_stage_begin() { g_rows.cur = 0; }
 namespace {
 
 constexpr int kThreads = 256;
@@ -665,8 +701,9 @@ template <int HD, int KF>
 __global__ void __launch_bounds__(kThreads) index_score_kernel(const float* __restrict__ q, const float* __restrict__ w,
                                                                const uint8_t* __restrict__ kc, int heads, int n,
                                                                const int* __restrict__ cand, int cand_stride, int blk,
-                                                               Rows lim, float* __restrict__ out,
-                                                               long long out_stride) {
+                                                               Rows lim_v, float* __restrict__ out,
+                                                               long long out_stride, const Rows* lim_p) {
+    const Rows& lim = lim_p != nullptr ? *lim_p : lim_v;
     extern __shared__ float qs[];   // heads * HD, then heads weights
     const int t = blockIdx.y;
     for (int i = threadIdx.x; i < heads * HD; i += blockDim.x) qs[i] = q[(size_t) t * heads * HD + i];
@@ -730,9 +767,10 @@ __device__ __forceinline__ uint32_t ord_key(float f) {
 }
 
 // a block a row: the k-th largest key by four 8-bit radix passes, then everything above it and enough of its ties
-__global__ void __launch_bounds__(1024) topk_kernel(const float* __restrict__ vals, long long stride, Rows r,
+__global__ void __launch_bounds__(1024) topk_kernel(const float* __restrict__ vals, long long stride, Rows r_v,
                                                     const int* __restrict__ cand, int cand_stride, int blk,
-                                                    int* __restrict__ out, int out_stride) {
+                                                    int* __restrict__ out, int out_stride, const Rows* r_p) {
+    const Rows& r = r_p != nullptr ? *r_p : r_v;
     __shared__ unsigned hist[256];
     __shared__ uint32_t prefix_s, mask_s;
     __shared__ int remaining_s;
@@ -831,8 +869,9 @@ __global__ void __launch_bounds__(1024) topk_kernel(const float* __restrict__ va
     }
 }
 
-__global__ void block_max_kernel(const float* __restrict__ score, long long stride, Rows r, int blk,
-                                 float* __restrict__ bm, long long bm_stride) {
+__global__ void block_max_kernel(const float* __restrict__ score, long long stride, Rows r_v, int blk,
+                                 float* __restrict__ bm, long long bm_stride, const Rows* r_p) {
+    const Rows& r = r_p != nullptr ? *r_p : r_v;
     const int b = blockIdx.x * blockDim.x + threadIdx.x, t = blockIdx.y;
     int n, k_;
     rows_at(r, t, n, k_);
@@ -858,8 +897,10 @@ __global__ void __launch_bounds__(kThreads) sparse_attn_kernel(const float* __re
                                                                const uint16_t* __restrict__ win,
                                                                const uint16_t* __restrict__ ckv,
                                                                const int* __restrict__ sel, int sel_stride,
-                                                               AttnRows ar, const float* __restrict__ sink, int heads,
-                                                               int d, float scale, float* __restrict__ out) {
+                                                               AttnRows ar_v, const float* __restrict__ sink, int heads,
+                                                               int d, float scale, float* __restrict__ out,
+                                                               const AttnRows* ar_p) {
+    const AttnRows& ar = ar_p != nullptr ? *ar_p : ar_v;
     // d == 512: a thread owns 2 output values, a lane 16 of a row's dot
     const int h = blockIdx.x, t = blockIdx.y;
     int n_win, n_sel, w0;
@@ -1018,8 +1059,9 @@ __device__ __forceinline__ void unpack32(const uint8_t* rr, int part, uint4* dst
 // out[t * cap + i] = ckv[sel[t][i]] for i < the query's n_sel - for the BF16 kernel reading them in place (once a
 // query, not once a head)
 __global__ void __launch_bounds__(kThreads) unpack_sel_kernel(const uint8_t* __restrict__ ckv,
-                                                              const int* __restrict__ sel, int sel_stride, AttnRows ar,
-                                                              int cap, uint16_t* __restrict__ out) {
+                                                              const int* __restrict__ sel, int sel_stride, AttnRows ar_v,
+                                                              int cap, uint16_t* __restrict__ out, const AttnRows* ar_p) {
+    const AttnRows& ar = ar_p != nullptr ? *ar_p : ar_v;
     const int t = blockIdx.y, i = blockIdx.x * kStage + (int) (threadIdx.x >> 4), part = threadIdx.x & 15;
     int n_sel;
     if (ar.gen) {
@@ -2550,14 +2592,19 @@ void index_score(const float* q, const float* w, const void* k, int heads, int h
                                                out, out_stride, kfmt))
         return;
 #endif
+    // (local) row staging (STRATA_DS4_SEQ_ALIGN): the rows from their device slot, and the key count rounded up to 2048 so
+    // the grid and the bound change every 2048 keys, not every window (the keys past the rows' own count score -inf)
+    const Rows* lp = stage_rows(lim, s);
+    const Rows& lv = lp != nullptr ? kNoRows : lim;
+    if (lp != nullptr) n = (int) std::min<long long>((long long) (n + 2047) / 2048 * 2048, out_stride);
     const size_t smem = (size_t) (heads * hd + heads) * sizeof(float);
     const dim3 grid(cdiv(n, kThreads), T);
     if (kfmt == kKvFp4p)
         strata_ds4_launch(index_score_kernel<128, kKvFp4p>, grid, kThreads, smem, s, q, w, (const uint8_t*) k, heads, n, cand,
-                                                                       cand_stride, blk, lim, out, out_stride);
+                                                                       cand_stride, blk, lv, out, out_stride, lp);
     else
         strata_ds4_launch(index_score_kernel<128, kKvBf16>, grid, kThreads, smem, s, q, w, (const uint8_t*) k, heads, n, cand,
-                                                                       cand_stride, blk, lim, out, out_stride);
+                                                                       cand_stride, blk, lv, out, out_stride, lp);
 }
 
 void topk(const float* vals, long long stride, int T, const Rows& r, const int* cand, int cand_stride, int blk,
@@ -2566,7 +2613,9 @@ void topk(const float* vals, long long stride, int T, const Rows& r, const int* 
     // topk_kernel on the Metal dispatch; the launch below is the fallback
     if (strata::dsv41::metal_host::topk(vals, stride, T, &r, cand, cand_stride, blk, out, out_stride)) return;
 #endif
-    strata_ds4_launch(topk_kernel, T, 1024, 0, s, vals, stride, r, cand, cand_stride, blk, out, out_stride);
+    const Rows* rp = stage_rows(r, s);   // (local) row staging
+    strata_ds4_launch(topk_kernel, T, 1024, 0, s, vals, stride, rp != nullptr ? kNoRows : r, cand, cand_stride, blk, out, out_stride,
+                      rp);
 }
 
 void cand_blocks(const float* score, long long stride, int T, const Rows& r, int blk, float* bm, long long bm_stride,
@@ -2588,7 +2637,10 @@ void cand_blocks(const float* score, long long stride, int T, const Rows& r, int
     // returning here skipped it, the candidate list stayed unwritten and every context past 16K tokens (4,096 compressed rows) read garbage.
     if (!strata::dsv41::metal_host::block_max(score, stride, T, &r, blk, bm, bm_stride, nb_max))
 #endif
-    strata_ds4_launch(block_max_kernel, dim3(cdiv(nb_max, kThreads), T), kThreads, 0, s, score, stride, r, blk, bm, bm_stride);
+    const Rows* rp = stage_rows(r, s);   // (local) row staging; the blocks' grid rounded up as index_score's keys
+    if (rp != nullptr) nb_max = (nb_max + kThreads - 1) / kThreads * kThreads;
+    strata_ds4_launch(block_max_kernel, dim3(cdiv(nb_max, kThreads), T), kThreads, 0, s, score, stride, rp != nullptr ? kNoRows : r,
+                      blk, bm, bm_stride, rp);
     topk(bm, bm_stride, T, rb, nullptr, 0, 1, out, out_stride, s);
 }
 
@@ -2612,14 +2664,17 @@ void sparse_attn(const float* q, const uint16_t* win, const void* ckv, const int
         std::fprintf(stderr, "ds4 sparse_attn: head dim %d (rows %d) not covered\n", d, ckv_fmt);
         return;
     }
+    // (local) row staging: the kernels below read the rows from their device slot (the host still reads a for its choices)
+    const AttnRows* ap = a.gen == 0 ? stage_rows(a, s) : nullptr;
+    const AttnRows& av = ap != nullptr ? kNoAttnRows : a;
 #if defined(STRATA_METAL)
     // sparse_attn_packed_kernel<G> / sparse_attn_kernel<false> on the Metal dispatch; the launches below are the fallback
     if (strata::dsv41::metal_host::sparse_attn(q, win, ckv, sel, sel_stride, &a, sink, heads, d, T, scale, out, ckv_fmt))
         return;
 #endif
     if (ckv_fmt == kKvBf16) {
-        strata_ds4_launch(sparse_attn_kernel<false>, dim3(heads, T), kThreads, 0, s, q, win, (const uint16_t*) ckv, sel, sel_stride, a,
-                                                                       sink, heads, d, scale, out);
+        strata_ds4_launch(sparse_attn_kernel<false>, dim3(heads, T), kThreads, 0, s, q, win, (const uint16_t*) ckv, sel, sel_stride, av,
+                                                                       sink, heads, d, scale, out, ap);
         return;
     }
     // a decode step / short verify window of packed rows: the split-KV kernel (Strata's CUDA lab, ds4_attn_split.cuh; 2.9x at
@@ -2645,16 +2700,16 @@ void sparse_attn(const float* q, const uint16_t* win, const void* ckv, const int
         if (strata::dsv41::metal_host::unpack_sel(ckv, sel, sel_stride, a.gen, a.p0, a.t0, a.R, a.kcap, a.nsel,
                 scr->cap, scr->rows, T, a.gen ? 1 : (T < kWin ? T : kWin), kv_row_bytes(kKvFp4, 512))) return;
 #endif
-        strata_ds4_launch(unpack_sel_kernel, dim3(cdiv(sel_stride, kStage), T), kThreads, 0, s, (const uint8_t*) ckv, sel, sel_stride, a,
-                                                                               scr->cap, scr->rows);
+        strata_ds4_launch(unpack_sel_kernel, dim3(cdiv(sel_stride, kStage), T), kThreads, 0, s, (const uint8_t*) ckv, sel, sel_stride, av,
+                                                                               scr->cap, scr->rows, ap);
 #if !defined(STRATA_USE_HIP)
         if (T == 1)   // (V100: the loads ahead pay for the decode's kernel at one query, not at more)
-            strata_ds4_launch(sparse_attn_kernel<true, 8>, dim3(heads, T), kThreads, 0, s, q, win, scr->rows, nullptr, scr->cap, a, sink,
-                                                                             heads, d, scale, out);
+            strata_ds4_launch(sparse_attn_kernel<true, 8>, dim3(heads, T), kThreads, 0, s, q, win, scr->rows, nullptr, scr->cap, av, sink,
+                                                                             heads, d, scale, out, ap);
         else
 #endif
-            strata_ds4_launch(sparse_attn_kernel<true, 0>, dim3(heads, T), kThreads, 0, s, q, win, scr->rows, nullptr, scr->cap, a, sink,
-                                                                             heads, d, scale, out);
+            strata_ds4_launch(sparse_attn_kernel<true, 0>, dim3(heads, T), kThreads, 0, s, q, win, scr->rows, nullptr, scr->cap, av, sink,
+                                                                             heads, d, scale, out, ap);
         return;
     }
     // DS4_FAST_ATTN=1: the chunked prompt's matrix-core path (16 heads a block, a 16-key tile).  The decode and the
