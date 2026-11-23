@@ -14345,6 +14345,54 @@ struct Model::Impl {
         //  each layer - cudaEventSynchronize mid-window - and cannot be recorded)
         return on && !graph_broken && devs.size() == 1 && !prof_window && dump_h == nullptr && wplan.async;
     }
+    // (local) STRATA_DS4_GRAPH_CENSUS=<file> (with STRATA_DS4_GRAPH=1): each recorded window's nodes appended to the file -
+    // "W <window> T <T> P <pos> N <nodes>", then a line a node: kernels as "K <name> <grid> <block> <smem> <param bytes, hex,
+    // '|' between parameters>", copies as "C <dst> <src> <bytes> <kind>", others as "O <type>" - for the first 40 windows of
+    // each size: what changes from window to window (tools: Strata-data/bench-ahead/census.py)
+    void graph_census(cudaGraph_t gph, int T) {
+        static const char* path = std::getenv("STRATA_DS4_GRAPH_CENSUS");
+        if (path == nullptr) return;
+        static std::map<int, int> seen;
+        if (++seen[T] > 40) return;
+        static std::FILE* f = std::fopen(path, "w");
+        if (f == nullptr) return;
+        size_t nn = 0;
+        cudaGraphGetNodes(gph, nullptr, &nn);
+        std::vector<cudaGraphNode_t> nodes(nn);
+        cudaGraphGetNodes(gph, nodes.data(), &nn);
+        std::fprintf(f, "W %ld T %d P %lld N %zu\n", g_steps, T, (long long) pos, nn);
+        for (cudaGraphNode_t nd : nodes) {
+            cudaGraphNodeType ty;
+            cudaGraphNodeGetType(nd, &ty);
+            if (ty == cudaGraphNodeTypeKernel) {
+                cudaKernelNodeParams kp{};
+                if (cudaGraphKernelNodeGetParams(nd, &kp) != cudaSuccess) { std::fprintf(f, "K ?\n"); continue; }
+                const char* fn = nullptr;
+                if (cudaFuncGetName(&fn, kp.func) != cudaSuccess || fn == nullptr) fn = "?";
+                std::string nm(fn);
+                if (nm.size() > 90) nm = nm.substr(0, 90);
+                for (char& ch : nm) if (ch == ' ') ch = '_';
+                std::fprintf(f, "K %s %ux%ux%u %ux%ux%u %u ", nm.c_str(), kp.gridDim.x, kp.gridDim.y, kp.gridDim.z, kp.blockDim.x,
+                             kp.blockDim.y, kp.blockDim.z, kp.sharedMemBytes);
+                for (size_t i = 0; kp.kernelParams != nullptr; ++i) {
+                    size_t off = 0, sz = 0;
+                    if (cudaFuncGetParamInfo(kp.func, i, &off, &sz) != cudaSuccess) break;
+                    const uint8_t* b = (const uint8_t*) kp.kernelParams[i];
+                    if (i) std::fputc('|', f);
+                    for (size_t k = 0; k < sz; ++k) std::fprintf(f, "%02x", b[k]);
+                }
+                (void) cudaGetLastError();
+                std::fputc('\n', f);
+            } else if (ty == cudaGraphNodeTypeMemcpy) {
+                cudaMemcpy3DParms mp{};
+                cudaGraphMemcpyNodeGetParams(nd, &mp);
+                std::fprintf(f, "C %p %p %zu %d\n", mp.dstPtr.ptr, mp.srcPtr.ptr, mp.extent.width * mp.extent.height * std::max<size_t>(1, mp.extent.depth), (int) mp.kind);
+            } else {
+                std::fprintf(f, "O %d\n", (int) ty);
+            }
+        }
+        std::fflush(f);
+    }
     bool forward_graph(int64_t p0, int T, std::string& err) {
         if (graph_mode() == 2 && !par) {   // (layer by layer, inside forward_serial)
             layer_graph = true;
@@ -14379,6 +14427,7 @@ struct Model::Impl {
             return false;
         }
         g_cap_ms += now_ms() - t0;
+        graph_census(gph, T);
         if (!graph_put(gph, gexec_by_T[T], d0.st, err)) return false;
         if (++g_steps == 20 || g_steps % 500 == 0)
             std::fprintf(stderr, "ds4: (local) graph: %ld windows, %ld updated, %ld instantiated, capture %.3f ms + update %.3f ms a window\n",
