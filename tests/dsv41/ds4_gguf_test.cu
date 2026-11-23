@@ -1898,6 +1898,7 @@ void test_engram_q6k(cudaStream_t s) {
 
 // (local) --bench-iqmv: the dense matrices' Q5_K GEMV (attention, shared experts) by column count, mv_kernel against
 // STRATA_DS4_MV_R's multi-row form (R 1, 2, 4), on random blocks: time, GB/s of weights, and whether the outputs are mv_kernel's bits
+// (the timed calls cycle through ~160 MB of copies, so the weights come from DRAM as in the engine, not from the 48 MB L2)
 void bench_iqmv(cudaStream_t s) {
     namespace iq = gg::iq;
     cudaEvent_t a, e;
@@ -1909,7 +1910,8 @@ void bench_iqmv(cudaStream_t s) {
     std::mt19937 rng(7);
     for (const Sh& sh : shapes) {
         const size_t rb = iq::row_bytes(iq::kQ5_K, sh.k), wb = rb * (size_t) sh.n;
-        std::vector<uint8_t> hw(wb * sh.nj);
+        const int ncopy = (int) (160000000 / (wb * sh.nj)) + 1;   // copies cycled through so the timed calls read DRAM, not L2 (48 MB)
+        std::vector<uint8_t> hw(wb * sh.nj * ncopy);
         for (auto& v : hw) v = (uint8_t) rng();
         for (size_t r = 0; r < hw.size(); r += 176) { hw[r] = 0x00; hw[r + 1] = 0x20; hw[r + 2] = 0x00; hw[r + 3] = 0x1c; }   // (sane f16 d / dmin per block)
         uint8_t* dw = nullptr;
@@ -1928,7 +1930,7 @@ void bench_iqmv(cudaStream_t s) {
         const size_t ny = (size_t) 16 * sh.n * sh.nj;
         CU(cudaMalloc(&dy, ny * 4));
         for (int nc : {1, 2, 4, 6, 8, 12, 16}) {
-            std::vector<iq::MvJob> jobs(sh.nj);
+            std::vector<iq::MvJob> jobs(sh.nj), jobc((size_t) sh.nj * ncopy);
             for (int j = 0; j < sh.nj; ++j) {
                 iq::MvJob& J = jobs[j];
                 J.w = dw + wb * j;
@@ -1942,6 +1944,11 @@ void bench_iqmv(cudaStream_t s) {
                 J.y = dy + (size_t) 16 * sh.n * j;
                 J.ycs = sh.n;
             }
+            for (int cp = 0; cp < ncopy; ++cp)
+                for (int j = 0; j < sh.nj; ++j) {
+                    jobc[(size_t) cp * sh.nj + j] = jobs[j];
+                    jobc[(size_t) cp * sh.nj + j].w = dw + wb * ((size_t) cp * sh.nj + j);
+                }
             std::vector<float> ref, got(ny);
             std::printf("%-28s cols %2d:", sh.name, nc);
             for (int mode : {0, 1, 2, 4}) {
@@ -1952,7 +1959,7 @@ void bench_iqmv(cudaStream_t s) {
                 CU(cudaMemcpy(got.data(), dy, ny * 4, cudaMemcpyDeviceToHost));
                 const int reps = 50;
                 cudaEventRecord(a, s);
-                for (int i = 0; i < reps; ++i) iq::mv(jobs.data(), sh.nj, s);
+                for (int i = 0; i < reps; ++i) iq::mv(jobc.data() + (size_t) (i % ncopy) * sh.nj, sh.nj, s);
                 cudaEventRecord(e, s);
                 CU(cudaEventSynchronize(e));
                 float ms = 0;
