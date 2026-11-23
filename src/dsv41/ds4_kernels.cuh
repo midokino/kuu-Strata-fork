@@ -218,6 +218,12 @@ void combine(const float* ed, const float* cpu, const float* sh, const Combine& 
 /// kRing.  The device publishes a layer's routing and its FFN inputs for the window's T tokens (seq written last, after
 /// a system fence); the host answers with the CPU lane's weighted part of each token that took a CPU-lane expert.
 constexpr int kRing = 64;
+/// (local) STRATA_DS4_SEQ_ALIGN: while seq_base_dev is set (a decode window's launches), the mailbox kernels take their
+/// sequence numbers as offsets from the window's base (seq_base_val), the base itself read from this mapped word when
+/// they run - so a recorded window's parameters are the same from window to window (a static CUDA graph)
+extern const unsigned* seq_base_dev;
+extern unsigned seq_base_val;
+inline unsigned seq_arg(unsigned seq) { return seq_base_dev != nullptr ? seq - seq_base_val : seq; }
 constexpr int kMaxDim = 8192;
 constexpr int kAhead1 = 16, kAhead = kAhead1 + kPicks;   // a token's guesses for the next layer, then the one after
 struct Req {

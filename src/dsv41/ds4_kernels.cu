@@ -25,6 +25,8 @@
 #include <cstdio>
 
 namespace strata::ds4 {
+const unsigned* seq_base_dev = nullptr;   // (local) STRATA_DS4_SEQ_ALIGN, see ds4_kernels.cuh
+unsigned seq_base_val = 0;
 namespace {
 
 constexpr int kThreads = 256;
@@ -1739,7 +1741,8 @@ __global__ void __launch_bounds__(512) route_ahead_kernel(const float* __restric
     }
 }
 
-__global__ void publish_kernel(Req* req, int T, unsigned seq, int na0, int na1) {
+__global__ void publish_kernel(Req* req, int T, unsigned seq, int na0, int na1, const unsigned* base) {
+    if (base != nullptr) seq += *(volatile const unsigned*) base;
     __threadfence_system();
     req->na[0] = na0;
     req->na[1] = na1;
@@ -1748,8 +1751,9 @@ __global__ void publish_kernel(Req* req, int T, unsigned seq, int na0, int na1) 
     *(volatile unsigned*) &req->seq = seq;
 }
 
-__global__ void wait_seq_kernel(const unsigned* seq_ptr, unsigned seq) {
+__global__ void wait_seq_kernel(const unsigned* seq_ptr, unsigned seq, const unsigned* base) {
     if (threadIdx.x != 0) return;
+    if (base != nullptr) seq += *(volatile const unsigned*) base;
     while (*(volatile const unsigned*) seq_ptr != seq) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
         __nanosleep(200);
@@ -2208,7 +2212,7 @@ void route_publish(const float* logits, const float* bias, int n, int k, int T, 
 #endif
     strata_ds4_launch(route_publish_kernel, T, 512, 0, s, logits, bias, n, k, route_scale, vram, x, dim, idx, w, plan_ptr, req,
                                            vl != 0 ? bias_vl : nullptr, vl);
-    if (req != nullptr) strata_ds4_launch(publish_kernel, 1, 1, 0, s, req, T, seq, na0, na1);
+    if (req != nullptr) strata_ds4_launch(publish_kernel, 1, 1, 0, s, req, T, seq_arg(seq), na0, na1, seq_base_dev);
 }
 void route_ahead(const float* logits, const float* bias, int n, int m, int T, Req* req, int off, cudaStream_t s) {
 #if defined(STRATA_METAL)
@@ -2246,7 +2250,7 @@ void wait_seq(const unsigned* seq_ptr, unsigned seq, cudaStream_t s) {
     (void) seq_ptr; (void) seq; (void) s;
     return;
 #endif
-    strata_ds4_launch(wait_seq_kernel, 1, 32, 0, s, seq_ptr, seq);
+    strata_ds4_launch(wait_seq_kernel, 1, 32, 0, s, seq_ptr, seq_arg(seq), seq_base_dev);
 }
 
 // the RAM store's experts for the device (a decode token, window of one): a pick the VRAM table left at 0 whose expert the store holds

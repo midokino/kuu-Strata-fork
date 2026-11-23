@@ -3959,6 +3959,15 @@ struct Model::Impl {
             resps = (Resp*) m;
             std::memset((void*) reqs, 0, sizeof(Req) * kRing);
             std::memset((void*) resps, 0, sizeof(Resp) * kRing);
+            if (seq_align()) {   // (local) STRATA_DS4_SEQ_ALIGN: the window's sequence base, read by the mailbox kernels
+                if (cudaHostAlloc(&m, 64, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
+                    err = "host-mapped memory for the window's sequence base";
+                    return false;
+                }
+                host_allocs.push_back(m);
+                seq_base_h = (unsigned*) m;
+                *seq_base_h = 0;
+            }
             if (defer_mode() >= 2) {   // (local) STRATA_DS4_DEFER=2/3: the light experts' answers, a ring of their own
                 if (cudaHostAlloc(&m, sizeof(Resp) * kRing, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
                     err = "host-mapped memory for the deferred answers";
@@ -14128,11 +14137,42 @@ struct Model::Impl {
 
     // the window's plan, in window order (the indexer's and the candidate source's sizes carry from window to window)
     // (wp.nrow > 0: a multi step's rows, row t at wp.rpos[t] - decoded tokens, never a picture's)
+    // (local) STRATA_DS4_SEQ_ALIGN=1: each decode window's sequence numbers start at a multiple of kRing (the numbers
+    // skipped are published to the service thread as empty requests, which it answers and passes), so layer il always
+    // takes ring slot il + 1 - the slots' addresses in the window's kernel parameters are the same every window - and
+    // the numbers themselves go to the kernels as offsets from the base in seq_base_h (ds4_kernels.cuh).  For a static
+    // CUDA graph of the decode window; on its own it only changes which slots are used.
+    static bool seq_align() {
+        static const bool on = [] {
+            const char* v = std::getenv("STRATA_DS4_SEQ_ALIGN");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        return on;
+    }
+    unsigned* seq_base_h = nullptr;   // (mapped: the device reads it when the window's mailbox kernels run)
+    unsigned win_seq_base = 0;        // (the base plan_window gave the window being launched)
+    bool win_aligned = false;
+    void align_seq() {
+        const unsigned base = (seq_issued + (unsigned) kRing) & ~(unsigned) (kRing - 1);   // (above seq_issued, a multiple)
+        for (unsigned q = seq_issued + 1; q <= base; ++q) {   // (skipped: empty requests the service thread answers)
+            const int slot = (int) (q % kRing);
+            spec_of[slot].store(0, std::memory_order_relaxed);
+            layer_of[slot].store(-1, std::memory_order_release);
+            reqs[slot].T = 0;
+            std::atomic_thread_fence(std::memory_order_release);
+            *(volatile unsigned*) &reqs[slot].seq = q;
+        }
+        seq_issued = base;
+        win_seq_base = base;
+    }
+
     void plan_window(int64_t p0, int T, WinPlan& wp) {
         wp.par = par;
         // (a multi step's rows always on the async path, whatever their count: its verify windows reach 16 rows, and the
         //  host-routed path's sums for them were not its own decode's; Project Maya #611)
         wp.async = par || (!sync_decode && (T <= async_max_t || wp.nrow > 0));
+        win_aligned = wp.async && seq_align() && seq_base_h != nullptr && g.nl + 1 < kRing;
+        if (win_aligned) align_seq();
         wp.vl = 0;
         for (int t = 0; t < T && !imgs.empty() && wp.nrow == 0; ++t)
             if (in_image(p0 + t)) wp.vl |= 1u << t;
@@ -14480,11 +14520,22 @@ struct Model::Impl {
         prof_window = prof_on && T == 1;
         n_logits = std::min(logits_rows, T);
         const double tl = now_ms();
+        if (win_aligned) {   // (local) STRATA_DS4_SEQ_ALIGN: the mailbox kernels launched now read the base when they run
+            *(volatile unsigned*) seq_base_h = win_seq_base;
+            std::atomic_thread_fence(std::memory_order_release);
+            strata::ds4::seq_base_dev = seq_base_h;
+            strata::ds4::seq_base_val = win_seq_base;
+        }
+        struct SeqOff {   // (the drafter's and every other launch after the window's: plain sequence numbers again)
+            bool on;
+            ~SeqOff() { if (on) strata::ds4::seq_base_dev = nullptr; }
+        } seq_off{win_aligned};
         if (graph_on()) {
             if (!forward_graph(p0, T, err)) return false;
         } else if (par) {
             if (!forward_par(p0, T, err)) return false;
         } else if (!forward_serial(p0, T, err)) return false;
+        if (win_aligned) strata::ds4::seq_base_dev = nullptr;   // (before the head and the drafter's seeding launch)
         st.layer_ms += now_ms() - tl;
         for (auto& b : eg_win)
             if (b->live) eg_finish(*b);

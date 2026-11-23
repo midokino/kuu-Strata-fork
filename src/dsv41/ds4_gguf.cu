@@ -26,6 +26,11 @@
 #include <mutex>
 #include <unordered_map>
 
+namespace strata::ds4 {   // (local) STRATA_DS4_SEQ_ALIGN: defined in ds4_kernels.cu, declared in ds4_kernels.cuh
+extern const unsigned* seq_base_dev;
+extern unsigned seq_base_val;
+inline unsigned seq_arg(unsigned seq) { return seq_base_dev != nullptr ? seq - seq_base_val : seq; }
+}  // namespace strata::ds4
 namespace strata::ds4::gguf {
 namespace {
 
@@ -344,7 +349,19 @@ void quant_flush(const QuantItems& it, cudaStream_t s) {
         rmax = std::max(rmax, it.rows[i]);
     }
     const dim3 grid((unsigned) ((kmax / 32 + kWarps - 1) / kWarps), (unsigned) rmax, (unsigned) it.n);
-    strata_ds4_launch(q8_quant_multi_kernel, grid, kThreads, 0, s, it);
+    // (local) the unused items zeroed: the callers' QuantItems leave them as whatever the stack held, which the kernel
+    // never reads but which made every recorded launch's parameters differ (STRATA_DS4_GRAPH_CENSUS)
+    QuantItems c{};
+    c.n = it.n;
+    for (int i = 0; i < it.n; ++i) {
+        c.x[i] = it.x[i];
+        c.ldx[i] = it.ldx[i];
+        c.k[i] = it.k[i];
+        c.rows[i] = it.rows[i];
+        c.q[i] = it.q[i];
+        c.d[i] = it.d[i];
+    }
+    strata_ds4_launch(q8_quant_multi_kernel, grid, kThreads, 0, s, c);
 }
 
 // 8 E2M1 codes (a word of 4 code bytes) -> their values as int8: .x the low nibbles' (values 0..3 of the word's bytes),
@@ -730,8 +747,9 @@ __global__ void __launch_bounds__(128) mx_combine_kernel(const CombArgs a) {
                 a.sh_out != nullptr ? a.sh_out[(size_t) t * a.n_embd + r] : 0.0f, resp_scale(a.cpu_flag, t));
 }
 
-__global__ void mx_wait_kernel(const unsigned* p, unsigned v) {
+__global__ void mx_wait_kernel(const unsigned* p, unsigned v, const unsigned* base) {
     if (threadIdx.x != 0) return;
+    if (base != nullptr) v += *(volatile const unsigned*) base;
     while (*(volatile const unsigned*) p != v) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
         __nanosleep(200);
@@ -1610,7 +1628,7 @@ bool win_experts(const x3::WinArgs& a, cudaStream_t s) {
     }
 #if !defined(STRATA_METAL)
     // (this port's dispatches are synchronous and nothing is published to wait for: ds4_kernels.cu's wait_seq)
-    if (a.wait_ptr != nullptr) strata_ds4_launch(mx_wait_kernel, 1, 32, 0, s, a.wait_ptr, a.wait_val);
+    if (a.wait_ptr != nullptr) strata_ds4_launch(mx_wait_kernel, 1, 32, 0, s, a.wait_ptr, ::strata::ds4::seq_arg(a.wait_val), ::strata::ds4::seq_base_dev);
 #endif
     CombArgs c{};
     c.plan_ptr = a.plan_ptr;
