@@ -1373,6 +1373,183 @@ __global__ void __launch_bounds__(kThreads) sparse_attn_wmma_kernel(const float*
 }
 #endif   // STRATA_USE_HIP
 
+// (local) DS4_FAST_ATTN=1 on CUDA: sparse_attn_wmma_kernel's scheme on the tensor cores through mma.sync m16n8k16
+// (FP16 in, FP32 sums; sm_80 and later).  A block: 16 heads of one query, 8 warps; a 16-key tile staged once as FP16
+// (window rows BF16 -> FP16, packed rows decoded); the scores Q (16 x 512) K^T in 8 slices of 64 dims (a warp each),
+// summed in shared; one warp a 2 heads' online softmax; P (16 x 16) V (16 x 512) a warp's 64 dims, its accumulators in
+// registers (the m16n8 C layout: c0 c1 row g, c2 c3 row g + 8), rescaled per head.  The sums' order is the tensor cores',
+// not the scalar kernel's - so it stays opt-in.
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_METAL)
+constexpr int kFcHeads = 16, kFcKeys = 16, kFcD = 512, kFcLd = 520;
+__device__ __forceinline__ uint32_t f2h2(float a, float b) {
+    const __half2 h = __floats2half2_rn(a, b);
+    return *(const uint32_t*) &h;
+}
+__device__ __forceinline__ void mma16816(float* c, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+#endif
+}
+__global__ void __launch_bounds__(kThreads) sparse_attn_mma_kernel(const float* __restrict__ q,
+                                                                   const uint16_t* __restrict__ win,
+                                                                   const uint8_t* __restrict__ ckv,
+                                                                   const int* __restrict__ sel, int sel_stride,
+                                                                   AttnRows ar, const float* __restrict__ sink,
+                                                                   int heads, float scale, float* __restrict__ out) {
+    __shared__ __align__(16) uint16_t qs[kFcHeads * kFcLd];
+    __shared__ __align__(16) uint16_t ks[kFcKeys * kFcLd];
+    __shared__ float part[8][kFcHeads][kFcKeys];
+    __shared__ __align__(16) uint16_t ps[kFcHeads][kFcKeys + 8];
+    __shared__ const uint8_t* rows[kFcKeys];
+    __shared__ float m_run[kFcHeads], den[kFcHeads], ts[kFcHeads];
+    const int tid = (int) threadIdx.x, wp = tid >> 5, lane = tid & 31, g = lane >> 2, tg = lane & 3;
+    const int t = blockIdx.y, hb = blockIdx.x * kFcHeads;
+    int n_win, n_sel, w0;
+    if (ar.gen) {
+        const long long ta = ar.t0 + t, pa = ar.p0 + ta;
+        const long long first = max((long long) ar.win - ar.p0, ta + 1);
+        w0 = (int) first;
+        n_win = (int) (ar.win + ta - first + 1);
+        n_sel = ar.R > 0 ? (int) min((long long) ar.kcap, (pa + 1) / ar.R) : 0;
+    } else {
+        n_win = ar.nwin[t], n_sel = ar.nsel[t], w0 = ar.win0[t];
+    }
+    const uint16_t* wbase = win + (size_t) w0 * kFcD;
+    const int* sl = sel + (size_t) t * sel_stride;
+    const size_t crow = kv_row_bytes(kKvFp4, kFcD);
+    for (int i = tid * 2; i < kFcHeads * kFcD; i += kThreads * 2) {
+        const int h = i / kFcD, c = i % kFcD;
+        const float* qq = q + ((size_t) t * heads + hb + h) * kFcD + c;
+        *(uint32_t*) (qs + h * kFcLd + c) = f2h2(qq[0], qq[1]);
+    }
+    if (tid < kFcHeads) {
+        m_run[tid] = -1e30f;
+        den[tid] = 0.0f;
+    }
+    float o[8][4];
+#pragma unroll
+    for (int n = 0; n < 8; ++n)
+#pragma unroll
+        for (int i = 0; i < 4; ++i) o[n][i] = 0.0f;
+    const int total = n_win + n_sel;
+    for (int t0 = 0; t0 < total; t0 += kFcKeys) {
+        const int nt = min(kFcKeys, total - t0);
+        if (tid < nt) {
+            const int j = t0 + tid;
+            rows[tid] = j < n_win ? (const uint8_t*) (wbase + (size_t) j * kFcD) : ckv + (size_t) sl[j - n_win] * crow;
+        }
+        __syncthreads();
+        {   // stage: a thread 32 values of one row (rows past nt zeroed: their P is 0, and 0 x stale bits could be NaN)
+            const int sr = tid >> 4, pt = tid & 15;
+            uint16_t tmp[32];
+            if (sr >= nt) {
+#pragma unroll
+                for (int i = 0; i < 4; ++i) ((uint4*) tmp)[i] = make_uint4(0, 0, 0, 0);
+            } else if (t0 + sr < n_win) {
+                const uint4* src = (const uint4*) (rows[sr] + pt * 64);
+#pragma unroll
+                for (int i = 0; i < 4; ++i) ((uint4*) tmp)[i] = src[i];
+            } else {
+                unpack32(rows[sr], pt, (uint4*) tmp);
+            }
+            uint32_t hv[16];
+#pragma unroll
+            for (int i = 0; i < 16; ++i) hv[i] = f2h2(bf16f(tmp[2 * i]), bf16f(tmp[2 * i + 1]));
+            uint4* dst = (uint4*) (ks + sr * kFcLd + pt * 32);
+#pragma unroll
+            for (int i = 0; i < 4; ++i) dst[i] = make_uint4(hv[4 * i], hv[4 * i + 1], hv[4 * i + 2], hv[4 * i + 3]);
+        }
+        __syncthreads();
+        {   // scores: this warp's 64 dims, keys 0..7 and 8..15
+            float c0[4] = {0, 0, 0, 0}, c1[4] = {0, 0, 0, 0};
+#pragma unroll
+            for (int kk = wp * 64; kk < wp * 64 + 64; kk += 16) {
+                const uint32_t a0 = *(const uint32_t*) (qs + g * kFcLd + kk + 2 * tg);
+                const uint32_t a1 = *(const uint32_t*) (qs + (g + 8) * kFcLd + kk + 2 * tg);
+                const uint32_t a2 = *(const uint32_t*) (qs + g * kFcLd + kk + 2 * tg + 8);
+                const uint32_t a3 = *(const uint32_t*) (qs + (g + 8) * kFcLd + kk + 2 * tg + 8);
+                mma16816(c0, a0, a1, a2, a3, *(const uint32_t*) (ks + g * kFcLd + kk + 2 * tg),
+                         *(const uint32_t*) (ks + g * kFcLd + kk + 2 * tg + 8));
+                mma16816(c1, a0, a1, a2, a3, *(const uint32_t*) (ks + (g + 8) * kFcLd + kk + 2 * tg),
+                         *(const uint32_t*) (ks + (g + 8) * kFcLd + kk + 2 * tg + 8));
+            }
+            part[wp][g][2 * tg] = c0[0];
+            part[wp][g][2 * tg + 1] = c0[1];
+            part[wp][g + 8][2 * tg] = c0[2];
+            part[wp][g + 8][2 * tg + 1] = c0[3];
+            part[wp][g][8 + 2 * tg] = c1[0];
+            part[wp][g][8 + 2 * tg + 1] = c1[1];
+            part[wp][g + 8][8 + 2 * tg] = c1[2];
+            part[wp][g + 8][8 + 2 * tg + 1] = c1[3];
+        }
+        __syncthreads();
+        {   // the online softmax: a warp 2 heads, a lane a key
+            const int h = 2 * wp + (lane >> 4), k = lane & 15;
+            float a = 0.0f;
+#pragma unroll
+            for (int w = 0; w < 8; ++w) a += part[w][h][k];
+            const float s0 = k < nt ? a * scale : -INFINITY;
+            float m = s0;
+#pragma unroll
+            for (int of = 8; of > 0; of >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, of));
+            const float mo = m_run[h], mn = fmaxf(mo, m);
+            const float p = expf(s0 - mn);
+            ps[h][k] = __half_as_ushort(__float2half_rn(p));
+            float s = p;
+#pragma unroll
+            for (int of = 8; of > 0; of >>= 1) s += __shfl_xor_sync(0xffffffffu, s, of);
+            if (k == 0) {
+                ts[h] = expf(mo - mn);
+                den[h] = den[h] * ts[h] + s;
+                m_run[h] = mn;
+            }
+        }
+        __syncthreads();
+        {   // P V: this warp's 64 dims, 8 tiles of 8
+            const float sa = ts[g], sb = ts[g + 8];
+            const uint32_t a0 = *(const uint32_t*) &ps[g][2 * tg], a1 = *(const uint32_t*) &ps[g + 8][2 * tg];
+            const uint32_t a2 = *(const uint32_t*) &ps[g][2 * tg + 8], a3 = *(const uint32_t*) &ps[g + 8][2 * tg + 8];
+#pragma unroll
+            for (int n = 0; n < 8; ++n) {
+                o[n][0] *= sa;
+                o[n][1] *= sa;
+                o[n][2] *= sb;
+                o[n][3] *= sb;
+                const int dc = wp * 64 + n * 8 + g;
+                const uint32_t b0 = (uint32_t) ks[(2 * tg) * kFcLd + dc] | ((uint32_t) ks[(2 * tg + 1) * kFcLd + dc] << 16);
+                const uint32_t b1 = (uint32_t) ks[(2 * tg + 8) * kFcLd + dc] | ((uint32_t) ks[(2 * tg + 9) * kFcLd + dc] << 16);
+                mma16816(o[n], a0, a1, a2, a3, b0, b1);
+            }
+        }
+        __syncthreads();
+    }
+    const float da = den[g] + expf(sink[hb + g] - m_run[g]), db = den[g + 8] + expf(sink[hb + g + 8] - m_run[g + 8]);
+#pragma unroll
+    for (int n = 0; n < 8; ++n) {
+        const int dm = wp * 64 + n * 8 + 2 * tg;
+        float* oa = out + ((size_t) t * heads + hb + g) * kFcD + dm;
+        float* ob = out + ((size_t) t * heads + hb + g + 8) * kFcD + dm;
+        *(float2*) oa = make_float2(o[n][0] / da, o[n][1] / da);
+        *(float2*) ob = make_float2(o[n][2] / db, o[n][3] / db);
+    }
+}
+static bool device_has_mma16816() {
+    static std::atomic<int> cache[64];
+    int dev = 0;
+    cudaGetDevice(&dev);
+    if (dev < 0 || dev >= 64) return false;
+    int c = cache[dev].load();
+    if (c == 0) {
+        cudaDeviceProp prop{};
+        c = cudaGetDeviceProperties(&prop, dev) == cudaSuccess && prop.major >= 8 ? 2 : 1;
+        cache[dev].store(c);
+    }
+    return c == 2;
+}
+#endif
+
 // the ring's rows are kKvFp8: E4M3 codes, a UE8M0 scale per 32 (decoded: exactly the BF16 values they were made from)
 __global__ void ring_to_ext_kernel(const uint8_t* __restrict__ ring, uint16_t* __restrict__ ext, long long p0, int n,
                                    int d, const long long* pbase) {
@@ -2720,6 +2897,12 @@ void sparse_attn(const float* q, const uint16_t* win, const void* ckv, const int
     if (fast_attn_enabled() && a.gen != 0 && T >= kFaKeys && heads % kFaHeads == 0) {
         strata_ds4_launch(sparse_attn_wmma_kernel, dim3(heads / kFaHeads, T), kThreads, 0, s, q, win, (const uint8_t*) ckv, sel, sel_stride,
                                                                               a, sink, heads, scale, out);
+        return;
+    }
+#elif !defined(STRATA_METAL)
+    if (fast_attn_enabled() && a.gen != 0 && T >= kFcKeys && heads % kFcHeads == 0 && d == kFcD && device_has_mma16816()) {
+        strata_ds4_launch(sparse_attn_mma_kernel, dim3(heads / kFcHeads, T), kThreads, 0, s, q, win, (const uint8_t*) ckv, sel, sel_stride,
+                                                                             a, sink, heads, scale, out);
         return;
     }
 #endif
