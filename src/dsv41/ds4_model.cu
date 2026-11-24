@@ -1958,7 +1958,7 @@ struct Model::Impl {
         std::lock_guard<std::mutex> lk(prof_mu);
         const bool chunk_sample = prof_chunk;
         bool sample_ok = !prof_failed;
-        double sample_ms[6] = {};
+        double sample_ms[16] = {};   // (local fix: the prompt path's stages run to 10 - a [6] overran the stack, 0xC0000409 at the run's end)
         std::vector<std::pair<int, cudaEvent_t>> last;
         int current_dev = -1;
         if (sample_ok) {
@@ -1997,7 +1997,7 @@ struct Model::Impl {
         }
         if (sample_ok) {
             double* total = chunk_sample ? cprof_ms : st.prof_ms;
-            const int stages = chunk_sample ? 4 : 6;
+            const int stages = chunk_sample ? 11 : 6;   // (local fix: every prompt stage, not the first 4)
             for (int i = 0; i < stages; ++i) total[i] += sample_ms[i];
             for (const ProfMark& m : prof_marks) prof_pool[(size_t) m.dev].push_back(m.ev);
             prof_marks.clear();
