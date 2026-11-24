@@ -4363,6 +4363,13 @@ struct Model::Impl {
             // (the indexer's slab: its scores rows are the context wide - about 64 MB of them)
             c.AI = std::max(32, std::min(128, (int) (((size_t) 64 << 20) / (((size_t) o.max_context + 64) * 4)) / 32 * 32));
             c.w16_elems = (size_t) 8 << 20;
+            // (local) STRATA_DS4_LEND_ALL=1: a GGUF's i-quant experts lend the tail too, not MXFP4's alone (the read-back after a
+            // prompt, read_mx_file, takes any layout; Maya lends other layouts since).  Without it an IQ2 pack's chunk buffers
+            // hold their own VRAM for good: --prefill-chunk 8192 took the RTX 5070's VRAM experts 288 -> 128 (decode -20 %)
+            static const bool lend_all = [] {
+                const char* v = std::getenv("STRATA_DS4_LEND_ALL");
+                return v != nullptr && std::atoi(v) != 0;
+            }();
             bool has_eg = false, has_first = false, lend = borrow_on;
             size_t stride = 0;
             for (const Layer& l : L)
@@ -4371,7 +4378,7 @@ struct Model::Impl {
                         has_eg = has_eg || l.eg >= 0;
                         has_first = has_first || l.il == 0;
                         stride = std::max(stride, align256(unit(member(l, m))));
-                        lend = lend && l.nm == 1 && l.lay.fmt == gg::kFmtMXFP4;
+                        lend = lend && l.nm == 1 && (l.lay.fmt == gg::kFmtMXFP4 || lend_all);
                     }
             c.has_eg = has_eg, c.has_first = has_first;
             c.borrow = lend && stride > 0;
@@ -5732,7 +5739,12 @@ struct Model::Impl {
             CK(mem_info(&fr, &tot));
             const double room_e = std::max(0.0, (double) fr - (double) ((size_t) o.reserve_mib << 20)) * o.vram_experts;
             const size_t need = lay_chunk(c, chunk, nullptr, 2);
-            if (room_e >= 2.0 * (double) need) continue;   // (the chunk default's own bound: at most half the room)
+            // (local) STRATA_DS4_LEND_ROOM=f: lend where the experts' room is f x the buffers (default 2: at most half of it)
+            static const double lend_room = [] {
+                const char* v = std::getenv("STRATA_DS4_LEND_ROOM");
+                return v != nullptr ? std::max(1.0, std::atof(v)) : 2.0;
+            }();
+            if (room_e >= lend_room * (double) need) continue;   // (the chunk default's own bound: at most half the room)
             c.borrow = false;
             uint8_t* rows = nullptr;
             if (!dalloc(d, rows, need, err)) return false;
