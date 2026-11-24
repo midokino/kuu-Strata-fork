@@ -2713,11 +2713,89 @@ __global__ void __launch_bounds__(kThreads) gemv_bf16_kernel(const uint16_t* __r
     acc = warp_sum(acc);
     if (lane == 0) y[(size_t) t * ldy + row] = acc;
 }
+// (local) the same for many rows of x (a prompt's chunk): a warp a tile of kGbR rows x kGbT tokens, each lane's values
+// loaded once for all of the tile's dots - every dot's own fmaf chain and warp sum exactly as gemv_bf16_kernel's, so the
+// same bits; the weights and x read from L2 kGbT and kGbR times less
+constexpr int kGbR = 4, kGbT = 8;
+__global__ void __launch_bounds__(kThreads) gemv_bf16_tile_kernel(const uint16_t* __restrict__ W, const float* __restrict__ x,
+                                                                  int n, int k, int T, float* __restrict__ y, int ldy) {
+    const int r0 = (blockIdx.x * (kThreads / 32) + (threadIdx.x >> 5)) * kGbR, t0 = blockIdx.y * kGbT;
+    const int lane = threadIdx.x & 31;
+    if (r0 >= n) return;
+    const uint2* w[kGbR];
+    const float4* xv[kGbT];
+#pragma unroll
+    for (int i = 0; i < kGbR; ++i) w[i] = (const uint2*) (W + (size_t) min(r0 + i, n - 1) * k);
+#pragma unroll
+    for (int j = 0; j < kGbT; ++j) xv[j] = (const float4*) (x + (size_t) min(t0 + j, T - 1) * k);
+    float acc[kGbR][kGbT];
+#pragma unroll
+    for (int i = 0; i < kGbR; ++i)
+#pragma unroll
+        for (int j = 0; j < kGbT; ++j) acc[i][j] = 0.0f;
+    for (int c = lane; c < k / 4; c += 32) {
+        float wv[kGbR][4];
+#pragma unroll
+        for (int i = 0; i < kGbR; ++i) {
+            const uint2 u = w[i][c];
+            wv[i][0] = __uint_as_float(u.x << 16);
+            wv[i][1] = __uint_as_float(u.x & 0xFFFF0000u);
+            wv[i][2] = __uint_as_float(u.y << 16);
+            wv[i][3] = __uint_as_float(u.y & 0xFFFF0000u);
+        }
+#pragma unroll
+        for (int j = 0; j < kGbT; ++j) {
+            const float4 b = xv[j][c];
+#pragma unroll
+            for (int i = 0; i < kGbR; ++i) {
+                acc[i][j] = fmaf(wv[i][0], b.x, acc[i][j]);
+                acc[i][j] = fmaf(wv[i][1], b.y, acc[i][j]);
+                acc[i][j] = fmaf(wv[i][2], b.z, acc[i][j]);
+                acc[i][j] = fmaf(wv[i][3], b.w, acc[i][j]);
+            }
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < kGbR; ++i)
+#pragma unroll
+        for (int j = 0; j < kGbT; ++j) {
+            const float a = warp_sum(acc[i][j]);
+            if (lane == 0 && r0 + i < n && t0 + j < T) y[(size_t) (t0 + j) * ldy + r0 + i] = a;
+        }
+}
 void gemv_bf16(const uint16_t* W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s) {
 #if defined(STRATA_METAL)
     (void) W; (void) x; (void) n; (void) k; (void) T; (void) y; (void) ldy; (void) s;
 #else
-    if (T > 0) strata_ds4_launch(gemv_bf16_kernel, dim3(cdiv(n, kThreads / 32), T), kThreads, 0, s, W, x, n, k, y, ldy);
+    static const bool tile = [] {
+        const char* v = std::getenv("STRATA_DS4_ROUTER_TILE");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    if (tile && T >= 2 * kGbT) {
+        strata_ds4_launch(gemv_bf16_tile_kernel, dim3(cdiv(cdiv(n, kGbR), kThreads / 32), cdiv(T, kGbT)), kThreads, 0, s, W, x, n, k, T,
+                                                                                                          y, ldy);
+        static int checks = std::getenv("DS4_ROUTER_TILE_CHECK") ? std::atoi(std::getenv("DS4_ROUTER_TILE_CHECK")) : 0;
+        if (checks > 0) {   // (tests: the row-at-a-time kernel's result beside it, compared byte for byte)
+            --checks;
+            float* ref = nullptr;
+            const size_t nb = (size_t) T * ldy * 4;
+            if (cudaMallocAsync((void**) &ref, nb, s) == cudaSuccess) {
+                strata_ds4_launch(gemv_bf16_kernel, dim3(cdiv(n, kThreads / 32), T), kThreads, 0, s, W, x, n, k, ref, ldy);
+                std::vector<float> a((size_t) T * ldy), b((size_t) T * ldy);
+                cudaMemcpyAsync(a.data(), y, nb, cudaMemcpyDeviceToHost, s);
+                cudaMemcpyAsync(b.data(), ref, nb, cudaMemcpyDeviceToHost, s);
+                cudaStreamSynchronize(s);
+                cudaFreeAsync(ref, s);
+                long long diff = 0;
+                for (int t = 0; t < T; ++t)
+                    for (int r = 0; r < n; ++r)
+                        diff += std::memcmp(&a[(size_t) t * ldy + r], &b[(size_t) t * ldy + r], 4) != 0;
+                std::fprintf(stderr, "ds4 router tile check: T %d n %d k %d, %lld of %lld values differ\n", T, n, k, diff, (long long) T * n);
+            } else
+                cudaGetLastError();
+        }
+    } else if (T > 0)
+        strata_ds4_launch(gemv_bf16_kernel, dim3(cdiv(n, kThreads / 32), T), kThreads, 0, s, W, x, n, k, y, ldy);
 #endif
 }
 void gemv_f32(const float* W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s) {
