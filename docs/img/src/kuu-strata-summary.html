@@ -44,11 +44,11 @@ svg text{font-family:"Segoe UI",system-ui,sans-serif}
   <svg id="p" width="360" height="250"></svg></div>
  <div class="tiles">
   <div class="tile"><b>89.9 %</b><span>GPQA Diamond, one run (ISTA's card: 90.40 for this quant, 90.91 original)</span></div>
-  <div class="tile"><b>28.0 tok/s</b><span>mixed long jobs: prose, code, tool calls, translation, thinking</span></div>
+  <div class="tile"><b>30.7 tok/s</b><span>mixed long jobs: prose, code, tool calls, translation, thinking</span></div>
   <div class="tile"><b>0.183</b><span>KL against the same quant with 6 experts and nothing skipped (kuu precise: 0.057)</span></div>
  </div>
 </div>
-<div class="foot">Same PC throughout. This fork: the kuu fast preset, measured on 11/21. Upstream: Strata 0.2.7 as installed on 10/29 (upstream's own doc gives about 4.7 tok/s for an RTX 5070 with 64 GB). DSpark drafter on, 5 of 6 experts, 128K context. Software changes only; numbers move 3–8 % between runs.</div>
+<div class="foot">Same PC throughout. This fork: the kuu fast preset, measured on 11/24. Upstream: Strata 0.2.7 as installed on 10/29 (upstream's own doc gives about 4.7 tok/s for an RTX 5070 with 64 GB). DSpark drafter on, 5 of 6 experts, 128K context. Software changes only; numbers move 3–8 % between runs.</div>
 <script>
 const NS="http://www.w3.org/2000/svg";
 function chart(id,max,ticks,groups){
@@ -65,11 +65,11 @@ function chart(id,max,ticks,groups){
    el("text",{x:X(v)+8,y:y+15,"font-size":15,"font-weight":j?700:500,fill:"#0b0b0b"},b.t);});});
 }
 chart("g",40,[0,10,20,30,40],[
- {l:"Code, temperature 0",b:[{v:4.75,t:"4.6–4.9"},{v:32.5,t:"32.5"}]},
- {l:"Short replies (4 kinds)",b:[{v:6.7,t:"6.7"},{v:29.2,t:"29.2"}]},
+ {l:"Code, temperature 0",b:[{v:4.75,t:"4.6–4.9"},{v:35.8,t:"35.8"}]},
+ {l:"Short replies (4 kinds)",b:[{v:6.7,t:"6.7"},{v:30.9,t:"30.9"}]},
 ]);
-chart("p",600,[0,200,400,600],[
- {l:"4.6K-token prompt",b:[{v:62,t:"56–68"},{v:197,t:"195–199"}]},
- {l:"30K-token prompt",b:[{v:null},{v:519,t:"519"}]},
+chart("p",800,[0,200,400,600,800],[
+ {l:"4.6K-token prompt",b:[{v:62,t:"56–68"},{v:218,t:"209–227"}]},
+ {l:"30K-token prompt",b:[{v:null},{v:792,t:"792"}]},
 ]);
 </script></body></html>
